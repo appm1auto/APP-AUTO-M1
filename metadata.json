@@ -1,0 +1,8 @@
+{
+  "name": "VERSÃO 1-  M1 AUTO — O shopping de autopeças",
+  "description": "Marketplace completo de autopeças conectando clientes, fornecedores e entregas com cotação rápida, proteção por PIN e split de pagamentos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
