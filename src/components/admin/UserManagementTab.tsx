@@ -30,8 +30,12 @@ import {
   Plus,
   ExternalLink,
   Image as ImageIcon,
-  MessageSquare
+  MessageSquare,
+  FileSpreadsheet,
+  Download,
+  AlertTriangle
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { db } from '../../services/db';
 import {
   formatCep,
@@ -68,6 +72,22 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({ adminUser 
   const [formError, setFormError] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [pendingDeleteUser, setPendingDeleteUser] = useState<User | null>(null);
+  const [isSavingUser, setIsSavingUser] = useState(false);
+
+  // Excel import/export states
+  const excelInputRef = useRef<HTMLInputElement>(null);
+  const [excelImportModalOpen, setExcelImportModalOpen] = useState(false);
+  const [excelParsedRows, setExcelParsedRows] = useState<Array<Record<string, unknown>>>([]);
+  const [excelFileName, setExcelFileName] = useState('');
+  const [excelImportMode, setExcelImportMode] = useState<'skip_duplicates' | 'update_existing'>('skip_duplicates');
+  const [isImportingExcel, setIsImportingExcel] = useState(false);
+  const [excelImportReport, setExcelImportReport] = useState<{
+    createdCount: number;
+    updatedCount: number;
+    skippedDuplicates: number;
+    errors: Array<{ row: number; name?: string; phone?: string; reason: string }>;
+    duplicateDetails: Array<{ row: number; name?: string; phone?: string; reason: string }>;
+  } | null>(null);
 
   useEffect(() => {
     const unsub = db.subscribe(() => setRefreshTick(t => t + 1));
@@ -275,13 +295,23 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({ adminUser 
     }
   };
 
-  const handleSaveUser = (e: React.FormEvent) => {
+  const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
     if (formRole === 'fornecedor' && !isValidCep(formAddress.cep)) {
       setFormError('CEP válido (8 dígitos) é obrigatório para Fornecedores, pois define a geolocalização e o raio de atuação.');
       return;
     }
+    const cleanPhone = normalizeBrPhoneDigits(formPhone) || formPhone.replace(/\D/g, '');
+    if (cleanPhone.length < 10) {
+      setFormError('Informe um celular válido com DDD (10 ou 11 dígitos).');
+      return;
+    }
+    if (!formPassword.trim() || formPassword.trim().length < 4) {
+      setFormError('A senha de acesso deve ter no mínimo 4 caracteres.');
+      return;
+    }
+
     const resolvedCoords =
       formAddress.coordinates ||
       (isValidCep(formAddress.cep)
@@ -293,7 +323,6 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({ adminUser 
       coordinates: resolvedCoords,
     };
 
-    const cleanPhone = normalizeBrPhoneDigits(formPhone) || formPhone.replace(/\D/g, '');
     const selectedCategoryObjects = adminCategories.filter(c => formSupplierCategoryIds.includes(c.id));
     const derivedEquipmentTypes = Array.from(
       new Set([
@@ -303,104 +332,120 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({ adminUser 
     );
     const selectedCategoryNames = selectedCategoryObjects.map(c => c.name);
 
-    if (editingUser) {
-      // Update existing user
-      db.updateUser(
-        editingUser.id,
-        {
-          name: formName.trim(),
-          companyName: formCompanyName.trim() || undefined,
-          phone: cleanPhone,
-          password: formPassword.trim() || editingUser.password,
-          role: formRole,
-          personType: formPersonType,
-          document: formDocument.trim(),
-          avatarUrl: formAvatar || undefined,
-          status: formStatus,
-          address: normalizedFormAddress,
-          coordinates: resolvedCoords,
-          supplierTier: formRole === 'fornecedor' ? formSupplierTier : undefined,
-          supplierModalityId: formRole === 'fornecedor' ? (formModalityId || undefined) : undefined,
-          supplierClassificationEscrita: formRole === 'fornecedor' ? (formClassEscrita.trim() || undefined) : undefined,
-          supplierClassificationCondicao: formRole === 'fornecedor' ? (formClassCondicao.trim() || undefined) : undefined,
-          supplierClassificationPercent: formRole === 'fornecedor' ? formClassPercent : undefined,
-          isClassifiedByAdmin: formRole === 'fornecedor' ? formStatus === 'ativo' : undefined,
-          isAvailableForOrders: formRole === 'fornecedor' ? formStatus === 'ativo' : undefined,
-          approvedAt:
-            formRole === 'fornecedor' && formStatus === 'ativo'
-              ? editingUser.approvedAt || new Date().toISOString()
-              : editingUser.approvedAt,
-          approvedByAdminId:
-            formRole === 'fornecedor' && formStatus === 'ativo'
-              ? editingUser.approvedByAdminId || adminUser.id
-              : editingUser.approvedByAdminId,
-          supplierPaymentType: formRole === 'fornecedor' ? formSupplierPaymentType : undefined,
-          commissionRateOverride: formRole === 'fornecedor' ? formClassPercent : undefined,
-          bankAccountOrPix: formRole === 'fornecedor' ? formBankPix : undefined,
-          gatewayProvider: formRole === 'fornecedor' ? formGatewayProvider : undefined,
-          gatewayPixKey: formRole === 'fornecedor' ? (formBankPix.trim() || undefined) : undefined,
-          gatewayWalletId: formRole === 'fornecedor' ? (formGatewayWalletId.trim() || undefined) : undefined,
-          gatewayAccountStatus: formRole === 'fornecedor' ? formGatewayAccountStatus : undefined,
-          supplierCategoryIds: formRole === 'fornecedor' ? formSupplierCategoryIds : undefined,
-          categoriesSupplied:
-            formRole === 'fornecedor'
-              ? Array.from(new Set([...selectedCategoryNames, ...formSubcategoriesSupplied]))
-              : undefined,
-          subcategoriesSupplied: formRole === 'fornecedor' ? formSubcategoriesSupplied : undefined,
-          equipmentTypesSupplied: formRole === 'fornecedor' ? derivedEquipmentTypes : undefined,
-          serviceRadiusKm: formRole === 'fornecedor' ? formServiceRadiusKm : 0,
-          adminSharedMaterials: formSharedMaterials,
-        },
-        adminUser.id
-      );
-    } else {
-      // Create new user
-      db.createUser({
-        name: formName.trim(),
-        companyName: formCompanyName.trim() || undefined,
-        phone: cleanPhone,
-        email: '',
-        password: formPassword.trim() || '1234',
-        role: formRole,
-        personType: formPersonType,
-        document: formDocument.trim(),
-        avatarUrl: formAvatar || undefined,
-        status: formStatus,
-        address: normalizedFormAddress,
-        coordinates: resolvedCoords,
-        supplierTier: formRole === 'fornecedor' ? formSupplierTier : undefined,
-        supplierModalityId: formRole === 'fornecedor' ? (formModalityId || undefined) : undefined,
-        supplierClassificationEscrita: formRole === 'fornecedor' ? (formClassEscrita.trim() || undefined) : undefined,
-        supplierClassificationCondicao: formRole === 'fornecedor' ? (formClassCondicao.trim() || undefined) : undefined,
-        supplierClassificationPercent: formRole === 'fornecedor' ? formClassPercent : undefined,
-        isClassifiedByAdmin: formRole === 'fornecedor' ? formStatus === 'ativo' : undefined,
-        approvedAt: formRole === 'fornecedor' && formStatus === 'ativo' ? new Date().toISOString() : undefined,
-        approvedByAdminId: formRole === 'fornecedor' && formStatus === 'ativo' ? adminUser.id : undefined,
-        supplierPaymentType: formRole === 'fornecedor' ? formSupplierPaymentType : undefined,
-        commissionRateOverride: formRole === 'fornecedor' ? formClassPercent : undefined,
-        bankAccountOrPix: formRole === 'fornecedor' ? formBankPix : undefined,
-        gatewayProvider: formRole === 'fornecedor' ? formGatewayProvider : undefined,
-        gatewayPixKey: formRole === 'fornecedor' ? (formBankPix.trim() || undefined) : undefined,
-        gatewayWalletId: formRole === 'fornecedor' ? (formGatewayWalletId.trim() || undefined) : undefined,
-        gatewayAccountStatus: formRole === 'fornecedor' ? formGatewayAccountStatus : undefined,
-        supplierCategoryIds: formRole === 'fornecedor' ? formSupplierCategoryIds : undefined,
-        categoriesSupplied:
-          formRole === 'fornecedor'
-            ? Array.from(new Set([...selectedCategoryNames, ...formSubcategoriesSupplied]))
-            : [],
-        subcategoriesSupplied: formRole === 'fornecedor' ? formSubcategoriesSupplied : undefined,
-        equipmentTypesSupplied: formRole === 'fornecedor' ? derivedEquipmentTypes : undefined,
-        serviceRadiusKm: formRole === 'fornecedor' ? formServiceRadiusKm : 0,
-        adminSharedMaterials: formSharedMaterials,
-        citiesCovered: formAddress.city ? [formAddress.city] : ['São Paulo'],
-        isAvailableForOrders: formRole === 'fornecedor' && formStatus === 'ativo',
-        rating: 5.0,
-        totalRatings: 0,
-        totalSales: 0,
-      });
-    }
+    setIsSavingUser(true);
+    try {
+      if (editingUser) {
+        const res = await db.updateUserRemote(
+          editingUser.id,
+          {
+            name: formName.trim(),
+            companyName: formCompanyName.trim() || undefined,
+            phone: cleanPhone,
+            password: formPassword.trim() || editingUser.password,
+            role: formRole,
+            personType: formPersonType,
+            document: formDocument.trim(),
+            avatarUrl: formAvatar || undefined,
+            status: formStatus,
+            address: normalizedFormAddress,
+            coordinates: resolvedCoords,
+            supplierTier: formRole === 'fornecedor' ? formSupplierTier : undefined,
+            supplierModalityId: formRole === 'fornecedor' ? (formModalityId || undefined) : undefined,
+            supplierClassificationEscrita: formRole === 'fornecedor' ? (formClassEscrita.trim() || undefined) : undefined,
+            supplierClassificationCondicao: formRole === 'fornecedor' ? (formClassCondicao.trim() || undefined) : undefined,
+            supplierClassificationPercent: formRole === 'fornecedor' ? formClassPercent : undefined,
+            isClassifiedByAdmin: formRole === 'fornecedor' ? formStatus === 'ativo' : undefined,
+            isAvailableForOrders: formRole === 'fornecedor' ? formStatus === 'ativo' : undefined,
+            approvedAt:
+              formRole === 'fornecedor' && formStatus === 'ativo'
+                ? editingUser.approvedAt || new Date().toISOString()
+                : editingUser.approvedAt,
+            approvedByAdminId:
+              formRole === 'fornecedor' && formStatus === 'ativo'
+                ? editingUser.approvedByAdminId || adminUser.id
+                : editingUser.approvedByAdminId,
+            supplierPaymentType: formRole === 'fornecedor' ? formSupplierPaymentType : undefined,
+            commissionRateOverride: formRole === 'fornecedor' ? formClassPercent : undefined,
+            bankAccountOrPix: formRole === 'fornecedor' ? formBankPix : undefined,
+            gatewayProvider: formRole === 'fornecedor' ? formGatewayProvider : undefined,
+            gatewayPixKey: formRole === 'fornecedor' ? (formBankPix.trim() || undefined) : undefined,
+            gatewayWalletId: formRole === 'fornecedor' ? (formGatewayWalletId.trim() || undefined) : undefined,
+            gatewayAccountStatus: formRole === 'fornecedor' ? formGatewayAccountStatus : undefined,
+            supplierCategoryIds: formRole === 'fornecedor' ? formSupplierCategoryIds : undefined,
+            categoriesSupplied:
+              formRole === 'fornecedor'
+                ? Array.from(new Set([...selectedCategoryNames, ...formSubcategoriesSupplied]))
+                : undefined,
+            subcategoriesSupplied: formRole === 'fornecedor' ? formSubcategoriesSupplied : undefined,
+            equipmentTypesSupplied: formRole === 'fornecedor' ? derivedEquipmentTypes : undefined,
+            serviceRadiusKm: formRole === 'fornecedor' ? formServiceRadiusKm : 0,
+            adminSharedMaterials: formSharedMaterials,
+          },
+          adminUser.id
+        );
+        if (!res.ok) {
+          setFormError(res.message || 'Erro ao atualizar usuário.');
+          return;
+        }
+        setActionNotice(`Usuário "${formName.trim()}" atualizado no banco central.`);
+      } else {
+        const res = await db.createUserRemote(
+          {
+            name: formName.trim(),
+            companyName: formCompanyName.trim() || undefined,
+            phone: cleanPhone,
+            email: '',
+            password: formPassword.trim() || '1234',
+            role: formRole,
+            personType: formPersonType,
+            document: formDocument.trim(),
+            avatarUrl: formAvatar || undefined,
+            status: formStatus,
+            address: normalizedFormAddress,
+            coordinates: resolvedCoords,
+            supplierTier: formRole === 'fornecedor' ? formSupplierTier : undefined,
+            supplierModalityId: formRole === 'fornecedor' ? (formModalityId || undefined) : undefined,
+            supplierClassificationEscrita: formRole === 'fornecedor' ? (formClassEscrita.trim() || undefined) : undefined,
+            supplierClassificationCondicao: formRole === 'fornecedor' ? (formClassCondicao.trim() || undefined) : undefined,
+            supplierClassificationPercent: formRole === 'fornecedor' ? formClassPercent : undefined,
+            isClassifiedByAdmin: formRole === 'fornecedor' ? formStatus === 'ativo' : undefined,
+            approvedAt: formRole === 'fornecedor' && formStatus === 'ativo' ? new Date().toISOString() : undefined,
+            approvedByAdminId: formRole === 'fornecedor' && formStatus === 'ativo' ? adminUser.id : undefined,
+            supplierPaymentType: formRole === 'fornecedor' ? formSupplierPaymentType : undefined,
+            commissionRateOverride: formRole === 'fornecedor' ? formClassPercent : undefined,
+            bankAccountOrPix: formRole === 'fornecedor' ? formBankPix : undefined,
+            gatewayProvider: formRole === 'fornecedor' ? formGatewayProvider : undefined,
+            gatewayPixKey: formRole === 'fornecedor' ? (formBankPix.trim() || undefined) : undefined,
+            gatewayWalletId: formRole === 'fornecedor' ? (formGatewayWalletId.trim() || undefined) : undefined,
+            gatewayAccountStatus: formRole === 'fornecedor' ? formGatewayAccountStatus : undefined,
+            supplierCategoryIds: formRole === 'fornecedor' ? formSupplierCategoryIds : undefined,
+            categoriesSupplied:
+              formRole === 'fornecedor'
+                ? Array.from(new Set([...selectedCategoryNames, ...formSubcategoriesSupplied]))
+                : [],
+            subcategoriesSupplied: formRole === 'fornecedor' ? formSubcategoriesSupplied : undefined,
+            equipmentTypesSupplied: formRole === 'fornecedor' ? derivedEquipmentTypes : undefined,
+            serviceRadiusKm: formRole === 'fornecedor' ? formServiceRadiusKm : 0,
+            adminSharedMaterials: formSharedMaterials,
+            citiesCovered: formAddress.city ? [formAddress.city] : ['São Paulo'],
+            isAvailableForOrders: formRole === 'fornecedor' && formStatus === 'ativo',
+            rating: 5.0,
+            totalRatings: 0,
+            totalSales: 0,
+          },
+          adminUser.id
+        );
+        if (!res.ok) {
+          setFormError(res.message || 'Erro ao cadastrar usuário no servidor.');
+          return;
+        }
+        setActionNotice(`Usuário "${formName.trim()}" salvo com sucesso no banco central!`);
+      }
 
-    setIsAddModalOpen(false);
+      setIsAddModalOpen(false);
+    } finally {
+      setIsSavingUser(false);
+    }
   };
 
   const handleDeleteUser = (u: User) => {
@@ -411,11 +456,13 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({ adminUser 
     setPendingDeleteUser(u);
   };
 
-  const confirmDeleteUser = () => {
+  const confirmDeleteUser = async () => {
     if (!pendingDeleteUser) return;
-    db.deleteUser(pendingDeleteUser.id, adminUser.id);
-    setActionNotice(`Usuário "${pendingDeleteUser.name}" removido do banco central.`);
+    const deletedName = pendingDeleteUser.name;
+    const targetId = pendingDeleteUser.id;
     setPendingDeleteUser(null);
+    await db.deleteUserRemote(targetId, adminUser.id);
+    setActionNotice(`Usuário "${deletedName}" removido permanentemente do banco central.`);
   };
 
   const handleManualSync = async () => {
@@ -423,6 +470,157 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({ adminUser 
     await db.syncFromServer(true);
     setIsSyncingUsers(false);
     setActionNotice(`Base centralizada sincronizada (${db.getUsers().length} usuários carregados).`);
+  };
+
+  const handleDownloadUsersExcel = () => {
+    const allUsers = db.getUsers();
+    const rows = allUsers.map(u => ({
+      'ID': u.id,
+      'Perfil': u.role,
+      'Status': u.status,
+      'Nome Completo': u.name,
+      'Empresa / Loja': u.companyName || '',
+      'Telefone (WhatsApp DDD)': u.phone,
+      'Tipo Pessoa (PF/PJ)': u.personType,
+      'CPF / CNPJ': u.document || '',
+      'Senha (Protegida)': '***PROTEGIDA***',
+      'CEP': u.address?.cep || '',
+      'Rua': u.address?.street || '',
+      'Numero': u.address?.number || '',
+      'Complemento': u.address?.complement || '',
+      'Bairro': u.address?.neighborhood || '',
+      'Cidade': u.address?.city || '',
+      'UF': u.address?.state || '',
+      'Raio (km)': u.role === 'fornecedor' ? (u.serviceRadiusKm ?? 50) : 0,
+      'Tier Fornecedor': u.role === 'fornecedor' ? (u.supplierTier || '') : '',
+      'Chave PIX / Gateway': u.role === 'fornecedor' ? (u.gatewayPixKey || u.bankAccountOrPix || '') : '',
+      'Gateway Provider': u.role === 'fornecedor' ? (u.gatewayProvider || 'asaas') : '',
+      'Wallet ID': u.role === 'fornecedor' ? (u.gatewayWalletId || '') : '',
+      'Criado Em': u.createdAt ? new Date(u.createdAt).toLocaleString('pt-BR') : '',
+    }));
+
+    const instructionsRows = [
+      { Campo: 'Perfil', Regra: 'cliente | fornecedor | admin' },
+      { Campo: 'Status', Regra: 'ativo | pendente | bloqueado' },
+      { Campo: 'Telefone (WhatsApp DDD)', Regra: 'Obrigatório e único (10 ou 11 dígitos com DDD, ex: 11987654321)' },
+      { Campo: 'CPF / CNPJ', Regra: '11 dígitos (CPF) ou 14 dígitos (CNPJ) · Impede duplicidade entre usuários' },
+      { Campo: 'Senha (Protegida)', Regra: 'Por segurança a planilha nunca exporta senhas reais. Na atualização deixe ***PROTEGIDA*** ou vazio para manter a senha atual. Para NOVOS cadastros informe uma senha inicial com mínimo 4 caracteres.' },
+      { Campo: 'Tier Fornecedor', Regra: 'opcao_1 | opcao_2 | opcao_3 (opcional para clientes)' },
+    ];
+
+    const wb = XLSX.utils.book_new();
+    const wsUsers = XLSX.utils.json_to_sheet(rows);
+    wsUsers['!cols'] = [
+      { wch: 24 }, { wch: 12 }, { wch: 12 }, { wch: 28 }, { wch: 28 },
+      { wch: 20 }, { wch: 12 }, { wch: 20 }, { wch: 18 }, { wch: 12 },
+      { wch: 28 }, { wch: 10 }, { wch: 16 }, { wch: 18 }, { wch: 18 },
+      { wch: 6 }, { wch: 10 }, { wch: 15 }, { wch: 26 }, { wch: 15 },
+      { wch: 24 }, { wch: 20 },
+    ];
+    const wsInfo = XLSX.utils.json_to_sheet(instructionsRows);
+    wsInfo['!cols'] = [{ wch: 26 }, { wch: 90 }];
+
+    XLSX.utils.book_append_sheet(wb, wsUsers, 'Usuarios_AUTO_SHOP');
+    XLSX.utils.book_append_sheet(wb, wsInfo, 'Instrucoes_Importacao');
+
+    const dateTag = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(wb, `usuarios-autoshop-${dateTag}.xlsx`);
+    setActionNotice(`Planilha Excel gerada com ${allUsers.length} usuário(s) e senhas protegidas.`);
+  };
+
+  const handleExcelFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const buffer = await file.arrayBuffer();
+      const wb = XLSX.read(buffer, { type: 'array' });
+      const firstSheetName = wb.SheetNames[0];
+      if (!firstSheetName) {
+        setActionNotice('Planilha vazia: nenhuma aba encontrada.');
+        return;
+      }
+      const ws = wb.Sheets[firstSheetName];
+      const rawJson = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
+
+      const pickCol = (row: Record<string, unknown>, aliases: string[]): unknown => {
+        const normalizedMap = new Map<string, unknown>();
+        Object.entries(row).forEach(([k, v]) => {
+          const nk = k
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .trim()
+            .toLowerCase();
+          normalizedMap.set(nk, v);
+        });
+        for (const alias of aliases) {
+          const na = alias
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .trim()
+            .toLowerCase();
+          if (normalizedMap.has(na)) return normalizedMap.get(na);
+        }
+        return '';
+      };
+
+      const normalizedRows = rawJson.map((row, idx) => ({
+        rowNumber: idx + 2,
+        id: pickCol(row, ['ID', 'id']),
+        role: pickCol(row, ['Perfil', 'role', 'tipo']),
+        status: pickCol(row, ['Status', 'situacao']),
+        name: pickCol(row, ['Nome Completo', 'Nome', 'name']),
+        companyName: pickCol(row, ['Empresa / Loja', 'Empresa', 'Loja', 'Razao Social', 'companyName']),
+        phone: pickCol(row, ['Telefone (WhatsApp DDD)', 'Telefone', 'Celular', 'WhatsApp', 'phone']),
+        personType: pickCol(row, ['Tipo Pessoa (PF/PJ)', 'Tipo Pessoa', 'PF/PJ', 'personType']),
+        document: pickCol(row, ['CPF / CNPJ', 'CPF/CNPJ', 'Documento', 'CPF', 'CNPJ', 'document']),
+        password: pickCol(row, ['Senha (Protegida)', 'Senha Inicial', 'Senha', 'PIN', 'password']),
+        cep: pickCol(row, ['CEP', 'cep']),
+        street: pickCol(row, ['Rua', 'Logradouro', 'Endereco', 'street']),
+        number: pickCol(row, ['Numero', 'Nº', 'No', 'number']),
+        complement: pickCol(row, ['Complemento', 'complement']),
+        neighborhood: pickCol(row, ['Bairro', 'neighborhood']),
+        city: pickCol(row, ['Cidade', 'city']),
+        state: pickCol(row, ['UF', 'Estado', 'state']),
+        serviceRadiusKm: pickCol(row, ['Raio (km)', 'Raio', 'serviceRadiusKm']),
+        supplierTier: pickCol(row, ['Tier Fornecedor', 'Tier', 'Opcao', 'supplierTier']),
+        bankAccountOrPix: pickCol(row, ['Chave PIX / Gateway', 'Chave PIX', 'PIX', 'bankAccountOrPix']),
+        gatewayProvider: pickCol(row, ['Gateway Provider', 'Gateway', 'gatewayProvider']),
+        gatewayWalletId: pickCol(row, ['Wallet ID', 'Wallet', 'gatewayWalletId']),
+      }));
+
+      setExcelParsedRows(normalizedRows);
+      setExcelFileName(file.name);
+      setExcelImportReport(null);
+      setExcelImportModalOpen(true);
+    } catch {
+      setActionNotice('Não foi possível ler o arquivo Excel (.xlsx). Verifique se o formato é válido.');
+    } finally {
+      if (excelInputRef.current) excelInputRef.current.value = '';
+    }
+  };
+
+  const handleConfirmExcelImport = async () => {
+    if (excelParsedRows.length === 0) return;
+    setIsImportingExcel(true);
+    try {
+      const res = await db.importUsersRemote(excelParsedRows, excelImportMode, adminUser.id);
+      setExcelImportReport({
+        createdCount: res.createdCount,
+        updatedCount: res.updatedCount,
+        skippedDuplicates: res.skippedDuplicates,
+        errors: res.errors,
+        duplicateDetails: res.duplicateDetails,
+      });
+      if (res.ok) {
+        setActionNotice(
+          `Importação concluída: ${res.createdCount} criado(s), ${res.updatedCount} atualizado(s), ${res.skippedDuplicates} duplicidade(s) ignorada(s), ${res.errors.length} erro(s).`
+        );
+      } else if (res.message) {
+        setActionNotice(res.message);
+      }
+    } finally {
+      setIsImportingExcel(false);
+    }
   };
 
   return (
@@ -481,6 +679,32 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({ adminUser 
         </div>
 
         <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
+          <input
+            ref={excelInputRef}
+            type="file"
+            accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+            onChange={handleExcelFileSelected}
+            className="hidden"
+          />
+
+          <button
+            type="button"
+            onClick={handleDownloadUsersExcel}
+            className="px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center gap-2 shadow-sm transition cursor-pointer"
+          >
+            <Download className="w-4 h-4" />
+            <span>Baixar Planilha Excel (.xlsx)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => excelInputRef.current?.click()}
+            className="px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-2 shadow-sm transition cursor-pointer"
+          >
+            <FileSpreadsheet className="w-4 h-4" />
+            <span>Enviar Planilha Excel (.xlsx)</span>
+          </button>
+
           <button
             type="button"
             onClick={handleManualSync}
@@ -1466,12 +1690,163 @@ export const UserManagementTab: React.FC<UserManagementTabProps> = ({ adminUser 
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold shadow-md cursor-pointer"
+                  disabled={isSavingUser}
+                  className="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white text-xs font-bold shadow-md cursor-pointer"
                 >
-                  {editingUser ? 'Salvar Alterações' : 'Cadastrar Usuário'}
+                  {isSavingUser ? 'Salvando no servidor...' : editingUser ? 'Salvar Alterações' : 'Cadastrar Usuário'}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Importação Excel (.xlsx) */}
+      {excelImportModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
+          <div className="w-full max-w-2xl rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl p-6 relative max-h-[90vh] overflow-y-auto space-y-4">
+            <button
+              type="button"
+              onClick={() => setExcelImportModalOpen(false)}
+              className="absolute top-4 right-4 p-1.5 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-blue-100 dark:bg-blue-950/60 text-blue-600 flex items-center justify-center shrink-0">
+                <FileSpreadsheet className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-slate-900 dark:text-white">
+                  Importação em Massa via Excel (.xlsx)
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Arquivo: <strong className="font-mono">{excelFileName}</strong> · {excelParsedRows.length} linha(s) lida(s)
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-2">
+              <span className="block text-xs font-black text-slate-800 dark:text-slate-200">
+                Regra para Cadastros Existentes (Deduplicação por Telefone & CPF/CNPJ):
+              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                <label className={`p-2.5 rounded-xl border-2 cursor-pointer flex items-start gap-2 ${excelImportMode === 'skip_duplicates' ? 'border-blue-600 bg-blue-50/70 dark:bg-blue-950/40' : 'border-slate-200 dark:border-slate-700'}`}>
+                  <input
+                    type="radio"
+                    name="excelImportMode"
+                    checked={excelImportMode === 'skip_duplicates'}
+                    onChange={() => setExcelImportMode('skip_duplicates')}
+                    className="mt-0.5 accent-blue-600"
+                  />
+                  <div>
+                    <strong className="block text-slate-900 dark:text-white">Ignorar duplicados (Recomendado)</strong>
+                    <span className="text-[11px] text-slate-500">Insere apenas usuários novos e bloqueia celulares ou CPF/CNPJ repetidos.</span>
+                  </div>
+                </label>
+                <label className={`p-2.5 rounded-xl border-2 cursor-pointer flex items-start gap-2 ${excelImportMode === 'update_existing' ? 'border-amber-600 bg-amber-50/70 dark:bg-amber-950/40' : 'border-slate-200 dark:border-slate-700'}`}>
+                  <input
+                    type="radio"
+                    name="excelImportMode"
+                    checked={excelImportMode === 'update_existing'}
+                    onChange={() => setExcelImportMode('update_existing')}
+                    className="mt-0.5 accent-amber-600"
+                  />
+                  <div>
+                    <strong className="block text-slate-900 dark:text-white">Atualizar existentes sem alterar senhas</strong>
+                    <span className="text-[11px] text-slate-500">Atualiza dados cadastrais mantendo a senha original se marcada como ***PROTEGIDA***.</span>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            {excelImportReport ? (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
+                  <div className="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-900">
+                    <span className="block text-lg font-black text-emerald-700 dark:text-emerald-300">{excelImportReport.createdCount}</span>
+                    <span className="text-[10px] font-bold uppercase text-emerald-600">Criados</span>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/50 border border-blue-200 dark:border-blue-900">
+                    <span className="block text-lg font-black text-blue-700 dark:text-blue-300">{excelImportReport.updatedCount}</span>
+                    <span className="text-[10px] font-bold uppercase text-blue-600">Atualizados</span>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-900">
+                    <span className="block text-lg font-black text-amber-700 dark:text-amber-300">{excelImportReport.skippedDuplicates}</span>
+                    <span className="text-[10px] font-bold uppercase text-amber-600">Duplicados Ignorados</span>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900">
+                    <span className="block text-lg font-black text-red-700 dark:text-red-300">{excelImportReport.errors.length}</span>
+                    <span className="text-[10px] font-bold uppercase text-red-600">Erros</span>
+                  </div>
+                </div>
+
+                {excelImportReport.duplicateDetails.length > 0 && (
+                  <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 max-h-36 overflow-y-auto space-y-1 text-xs">
+                    <strong className="text-amber-800 dark:text-amber-200 block">Registros Duplicados Preservados:</strong>
+                    {excelImportReport.duplicateDetails.map((d, i) => (
+                      <div key={i} className="text-[11px] text-amber-700 dark:text-amber-300">
+                        Linha {d.row} ({d.name || 'Sem nome'} · {d.phone || 'S/ tel'}): {d.reason}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {excelImportReport.errors.length > 0 && (
+                  <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 max-h-40 overflow-y-auto space-y-1 text-xs">
+                    <strong className="text-red-800 dark:text-red-200 flex items-center gap-1">
+                      <AlertTriangle className="w-3.5 h-3.5" /> Erros de Validação:
+                    </strong>
+                    {excelImportReport.errors.map((err, i) => (
+                      <div key={i} className="text-[11px] text-red-700 dark:text-red-300">
+                        Linha {err.row} ({err.name || 'Sem nome'} · {err.phone || 'S/ tel'}): {err.reason}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-700 max-h-48 overflow-y-auto text-xs space-y-1">
+                <strong className="block text-slate-700 dark:text-slate-300 mb-1">Pré-visualização (primeiras linhas):</strong>
+                {excelParsedRows.slice(0, 8).map((r, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2 py-1 border-b border-slate-100 dark:border-slate-800 last:border-0 text-[11px]">
+                    <span className="font-bold text-slate-800 dark:text-slate-200 truncate">
+                      L{String(r.rowNumber)}: {String(r.name || '—')}
+                    </span>
+                    <span className="font-mono text-slate-500">
+                      {String(r.phone || '—')} · {String(r.role || 'cliente')}
+                    </span>
+                  </div>
+                ))}
+                {excelParsedRows.length > 8 && (
+                  <span className="text-[11px] text-slate-400 block pt-1">
+                    +{excelParsedRows.length - 8} linha(s) adicional(is)...
+                  </span>
+                )}
+              </div>
+            )}
+
+            <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setExcelImportModalOpen(false)}
+                className="px-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-bold cursor-pointer"
+              >
+                {excelImportReport ? 'Fechar' : 'Cancelar'}
+              </button>
+              {!excelImportReport && (
+                <button
+                  type="button"
+                  disabled={isImportingExcel || excelParsedRows.length === 0}
+                  onClick={handleConfirmExcelImport}
+                  className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 shadow-md cursor-pointer"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>{isImportingExcel ? 'Importando com segurança...' : 'Confirmar Importação no Banco'}</span>
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

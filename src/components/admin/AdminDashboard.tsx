@@ -1480,25 +1480,60 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUser }) =
                     </div>
                   </div>
 
-                  {req.mediaUrl && (
-                    <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center gap-3">
-                      <img
-                        src={req.mediaUrl}
-                        alt={req.partName}
-                        className="w-12 h-12 object-cover rounded-lg border border-slate-200 cursor-pointer hover:opacity-80 transition"
-                        onClick={() => setSelectedMediaPreview(req.mediaUrl!)}
-                      />
-                      <div>
-                        <span className="text-[10px] text-slate-400 font-bold uppercase block">Foto Original Enviada pelo Cliente:</span>
-                        <button
-                          onClick={() => setSelectedMediaPreview(req.mediaUrl!)}
-                          className="text-xs text-purple-600 dark:text-purple-400 underline font-semibold cursor-pointer"
-                        >
-                          Ampliar imagem em alta resolução
-                        </button>
+                  {(() => {
+                    const mainPhotos =
+                      req.mediaUrls && req.mediaUrls.length > 0
+                        ? req.mediaUrls
+                        : req.mediaUrl
+                        ? [req.mediaUrl]
+                        : [];
+                    const extraPartsWithPhotos = (req.extraParts || []).filter(
+                      ep => ep.mediaUrls && ep.mediaUrls.length > 0
+                    );
+                    const totalPhotos =
+                      mainPhotos.length +
+                      extraPartsWithPhotos.reduce((acc, ep) => acc + (ep.mediaUrls?.length || 0), 0);
+
+                    if (totalPhotos === 0) return null;
+
+                    return (
+                      <div className="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                        <span className="text-[10px] text-slate-400 font-bold uppercase block">
+                          Fotos Enviadas pelo Cliente ({totalPhotos}):
+                        </span>
+                        <div className="flex flex-wrap gap-2">
+                          {mainPhotos.map((photoUrl, idx) => (
+                            <div key={`${req.id}-adm-main-${idx}`} className="relative group">
+                              <img
+                                src={photoUrl}
+                                alt={`${req.partName} ${idx + 1}`}
+                                className="w-14 h-14 object-cover rounded-lg border border-slate-200 dark:border-slate-700 cursor-pointer hover:opacity-80 transition"
+                                onClick={() => setSelectedMediaPreview(photoUrl)}
+                              />
+                              <span className="absolute bottom-0.5 right-0.5 bg-black/75 text-white text-[9px] font-bold px-1 rounded">
+                                P1 #{idx + 1}
+                              </span>
+                            </div>
+                          ))}
+                          {extraPartsWithPhotos.map((ep, epIdx) =>
+                            (ep.mediaUrls || []).map((photoUrl, pIdx) => (
+                              <div key={`${req.id}-adm-extra-${epIdx}-${pIdx}`} className="relative group">
+                                <img
+                                  src={photoUrl}
+                                  alt={`${ep.partName || 'Peça extra'} ${pIdx + 1}`}
+                                  className="w-14 h-14 object-cover rounded-lg border border-purple-300 dark:border-purple-700 cursor-pointer hover:opacity-80 transition"
+                                  onClick={() => setSelectedMediaPreview(photoUrl)}
+                                />
+                                <span className="absolute bottom-0.5 right-0.5 bg-purple-700 text-white text-[9px] font-bold px-1 rounded">
+                                  P{epIdx + 2} #{pIdx + 1}
+                                </span>
+                              </div>
+                            ))
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {isExpanded && (
                     <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">

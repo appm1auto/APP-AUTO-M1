@@ -93,13 +93,17 @@ export const ClientAdsAdminTab: React.FC<ClientAdsAdminTabProps> = ({ currentUse
     setTimeout(() => setFeedback(null), 4000);
   };
 
-  const handleSaveSettings = (
+  const handleSaveSettings = async (
     nextPartial: Partial<ClientAdsSettings>,
     msg = 'Programação de anúncios salva!'
   ) => {
-    const updated = db.updateClientAdsSettings(nextPartial, currentUser.id);
-    setSettings(updated);
-    showSavedNotice(msg);
+    const res = await db.updateClientAdsSettingsRemote(nextPartial, currentUser.id);
+    setSettings(res.settings);
+    if (res.ok) {
+      showSavedNotice(msg);
+    } else {
+      setErrorMsg(res.message || 'Falha ao salvar propaganda no servidor.');
+    }
   };
 
   const commitTimingSettings = () => {
@@ -200,7 +204,7 @@ export const ClientAdsAdminTab: React.FC<ClientAdsAdminTabProps> = ({ currentUse
             }
           : item
       );
-      handleSaveSettings({ items: updatedItems }, 'Anúncio atualizado no App dos Clientes!');
+      handleSaveSettings({ items: updatedItems }, 'Anúncio atualizado e salvo originalmente no App dos Clientes!');
     } else {
       const newItem: ClientAdItem = {
         id: `ad_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -219,7 +223,7 @@ export const ClientAdsAdminTab: React.FC<ClientAdsAdminTabProps> = ({ currentUse
       };
       handleSaveSettings(
         { items: [...currentItems, newItem] },
-        'Novo anúncio publicado no App dos Clientes!'
+        'Novo anúncio salvo e publicado na tela dos Clientes!'
       );
     }
 
@@ -284,7 +288,7 @@ export const ClientAdsAdminTab: React.FC<ClientAdsAdminTabProps> = ({ currentUse
               ANÚNCIOS — Carrossel & Tela Inicial do App dos Clientes
             </h2>
             <p className="text-xs text-amber-50 mt-0.5">
-              Adicione fotos, vídeos curtos, textos, links e preços de produtos. Exiba na frente da tela nos 3 segundos iniciais ao abrir o app e em carrossel programável no rodapé (sequencial em segundos, pausado, fixo ou de tempos em tempos).
+              A propaganda salva permanece fixada exatamente como foi salva e só sai da tela do cliente mediante ordem direta do Administrador abaixo.
             </p>
           </div>
         </div>
@@ -297,14 +301,64 @@ export const ClientAdsAdminTab: React.FC<ClientAdsAdminTabProps> = ({ currentUse
               handleSaveSettings(
                 { enabled: e.target.checked },
                 e.target.checked
-                  ? 'Sistema de anúncios ativado!'
-                  : 'Anúncios desativados para clientes.'
+                  ? 'Exibição ativada na tela do cliente!'
+                  : 'Propaganda retirada da tela do cliente por ordem do Admin.'
               )
             }
             className="w-4 h-4 accent-white"
           />
           <span>Anúncios Ativos</span>
         </label>
+      </div>
+
+      {/* Comando Direto do Admin para Exibir / Retirar da Tela do Cliente */}
+      <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border-2 border-amber-300 dark:border-amber-800 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="space-y-0.5">
+          <div className="flex items-center gap-2">
+            <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase ${
+              settings.enabled && settings.footerEnabled
+                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                : 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300'
+            }`}>
+              {settings.enabled && settings.footerEnabled
+                ? 'EXIBINDO NA TELA DO CLIENTE'
+                : 'FORA DA TELA (ORDEM ADMIN)'}
+            </span>
+            <strong className="text-xs font-black text-slate-900 dark:text-white">
+              Controle Direto de Tela do Cliente
+            </strong>
+          </div>
+          <p className="text-[11px] text-slate-500">
+            O cliente não pode fechar a propaganda sozinho. Ela permanece salva originalmente e só sai da tela quando você clicar em Retirar.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          <button
+            type="button"
+            onClick={() =>
+              handleSaveSettings(
+                { enabled: true, footerEnabled: true },
+                'Propaganda mantida em exibição na tela dos Clientes!'
+              )
+            }
+            className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black cursor-pointer shadow-sm"
+          >
+            Exibir na Tela do Cliente
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              handleSaveSettings(
+                { enabled: false, footerEnabled: false },
+                'Ordem executada: Propaganda retirada da tela dos Clientes (itens preservados).'
+              )
+            }
+            className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-black cursor-pointer shadow-sm"
+          >
+            Retirar da Tela (Ordem Admin)
+          </button>
+        </div>
       </div>
 
       {feedback && (

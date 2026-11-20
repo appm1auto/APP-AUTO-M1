@@ -31,11 +31,13 @@ import {
 } from './src/services/paymentGateway.ts';
 import type {
   AuditLog,
+  ChatMessage,
   DeliveryAddress,
   GatewayBankInfo,
   OrderAndPayment,
   OrderDeliveryStatus,
   PartRequest,
+  PartRequestExtraPart,
   PaymentGatewayProvider,
   PaymentMethod,
   Quote,
@@ -43,8 +45,10 @@ import type {
   SplitPaymentStatus,
   SplitTransaction,
   SupplierPaymentType,
+  SupplierTier,
   User,
   UserRole,
+  UserStatus,
 } from './src/types/index.ts';
 
 const PORT = Number(process.env.PORT || 3000);
@@ -986,14 +990,27 @@ async function startServer() {
         return;
       }
 
+      const cleanDoc = document.replace(/\D/g, '');
       const envPre = ensureDbEnvelope();
-      const existingPre = envPre.data.users.find(u => brPhonesMatch(u.phone, cleanPhone));
-      if (existingPre) {
+      const existingPrePhone = envPre.data.users.find(u => brPhonesMatch(u.phone, cleanPhone));
+      if (existingPrePhone) {
         res.status(409).json({
           ok: false,
           message: 'Já existe uma conta cadastrada com este celular. Faça login com sua senha.',
         });
         return;
+      }
+      if (cleanDoc.length >= 11) {
+        const existingPreDoc = envPre.data.users.find(
+          u => (u.document || '').replace(/\D/g, '') === cleanDoc
+        );
+        if (existingPreDoc) {
+          res.status(409).json({
+            ok: false,
+            message: 'Já existe uma conta cadastrada com este CPF/CNPJ. Faça login com sua senha.',
+          });
+          return;
+        }
       }
 
       let resolvedCoords = body.address.coordinates;
@@ -1004,14 +1021,23 @@ async function startServer() {
         !resolvedCoords ||
         (resolvedPrecision !== 'gps' && resolvedPrecision !== 'exact_cep')
       ) {
-        const cepGeo = await resolveExactCepGeoOnServer(body.address.cep, {
-          street: body.address.street,
-          neighborhood: body.address.neighborhood,
-          city: body.address.city,
-          state: body.address.state,
-        });
-        resolvedCoords = cepGeo.coordinates;
-        resolvedPrecision = cepGeo.coordinatesPrecision;
+        // Resposta rápida sem travar o cadastro caso APIs externas de CEP demorem
+        const quickGeo = await Promise.race([
+          resolveExactCepGeoOnServer(body.address.cep, {
+            street: body.address.street,
+            neighborhood: body.address.neighborhood,
+            city: body.address.city,
+            state: body.address.state,
+          }),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 1500)),
+        ]);
+        if (quickGeo) {
+          resolvedCoords = quickGeo.coordinates;
+          resolvedPrecision = quickGeo.coordinatesPrecision;
+        } else {
+          resolvedCoords = estimateCoordinatesFromCep(body.address.cep, body.address.state);
+          resolvedPrecision = 'cep_prefix';
+        }
       }
 
       const normalizedAddress: DeliveryAddress = {
@@ -1034,6 +1060,18 @@ async function startServer() {
           message: 'Já existe uma conta cadastrada com este celular. Faça login com sua senha.',
         });
         return;
+      }
+      if (cleanDoc.length >= 11) {
+        const existingDoc = env.data.users.find(
+          u => (u.document || '').replace(/\D/g, '') === cleanDoc
+        );
+        if (existingDoc) {
+          res.status(409).json({
+            ok: false,
+            message: 'Já existe uma conta cadastrada com este CPF/CNPJ. Faça login com sua senha.',
+          });
+          return;
+        }
       }
 
       const gatewayPixKey = isSupplier ? body.gatewayPixKey?.trim() || undefined : undefined;
@@ -1257,10 +1295,22 @@ async function startServer() {
       }
       const envPre = ensureDbEnvelope();
       const cleanPhone = normalizeBrPhoneDigits(userData.phone) || userData.phone.replace(/\D/g, '');
+      if (cleanPhone.length < 10) {
+        res.status(400).json({ ok: false, message: 'Número de celular inválido (informe DDD + número).' });
+        return;
+      }
       const duplicatePre = envPre.data.users.find(u => brPhonesMatch(u.phone, cleanPhone));
       if (duplicatePre) {
-        res.status(409).json({ ok: false, message: 'Já existe uma conta cadastrada com este celular. Faça login com sua senha.' });
+        res.status(409).json({ ok: false, message: 'Já existe uma conta cadastrada com este celular.' });
         return;
+      }
+      const cleanDoc = (userData.document || '').replace(/\D/g, '');
+      if (cleanDoc.length >= 11) {
+        const dupDocPre = envPre.data.users.find(u => (u.document || '').replace(/\D/g, '') === cleanDoc);
+        if (dupDocPre) {
+          res.status(409).json({ ok: false, message: 'Já existe uma conta cadastrada com este CPF/CNPJ.' });
+          return;
+        }
       }
 
       let resolvedCoords = userData.coordinates || userData.address?.coordinates;
@@ -1269,49 +1319,432 @@ async function startServer() {
         isValidCep(userData.address?.cep) &&
         (!resolvedCoords || (resolvedPrecision !== 'gps' && resolvedPrecision !== 'exact_cep'))
       ) {
-        const cepGeo = await resolveExactCepGeoOnServer(userData.address?.cep, {
-          street: userData.address?.street,
-          neighborhood: userData.address?.neighborhood,
-          city: userData.address?.city,
-          state: userData.address?.state,
-        });
-        resolvedCoords = cepGeo.coordinates;
-        resolvedPrecision = cepGeo.coordinatesPrecision;
+        const quickGeo = await Promise.race([
+          resolveExactCepGeoOnServer(userData.address?.cep, {
+            street: userData.address?.street,
+            neighborhood: userData.address?.neighborhood,
+            city: userData.address?.city,
+            state: userData.address?.state,
+          }),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 1500)),
+        ]);
+        if (quickGeo) {
+          resolvedCoords = quickGeo.coordinates;
+          resolvedPrecision = quickGeo.coordinatesPrecision;
+        } else if (userData.address?.cep) {
+          resolvedCoords = estimateCoordinatesFromCep(userData.address.cep, userData.address.state);
+          resolvedPrecision = 'cep_prefix';
+        }
       }
 
       const env = ensureDbEnvelope();
       const duplicate = env.data.users.find(u => brPhonesMatch(u.phone, cleanPhone));
       if (duplicate) {
-        res.status(409).json({ ok: false, message: 'Já existe uma conta cadastrada com este celular. Faça login com sua senha.' });
+        res.status(409).json({ ok: false, message: 'Já existe uma conta cadastrada com este celular.' });
         return;
       }
+      if (cleanDoc.length >= 11) {
+        const dupDoc = env.data.users.find(u => (u.document || '').replace(/\D/g, '') === cleanDoc);
+        if (dupDoc) {
+          res.status(409).json({ ok: false, message: 'Já existe uma conta cadastrada com este CPF/CNPJ.' });
+          return;
+        }
+      }
 
+      const safePassword =
+        userData.password && userData.password.trim().length >= 4
+          ? userData.password.trim()
+          : '1234';
+      const nowIso = new Date().toISOString();
       const newUser: User = {
         ...userData,
         id: userData.id || `usr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         phone: cleanPhone,
+        password: safePassword,
         coordinates: resolvedCoords,
         coordinatesPrecision: resolvedPrecision,
         address: userData.address
           ? {
               ...userData.address,
+              cep: userData.address.cep ? formatCep(userData.address.cep) : '',
               coordinates: userData.address.coordinates || resolvedCoords,
               coordinatesPrecision: userData.address.coordinatesPrecision || resolvedPrecision,
             }
           : undefined,
-        createdAt: userData.createdAt || new Date().toISOString(),
-        lastLogin: userData.lastLogin || new Date().toISOString(),
+        createdAt: userData.createdAt || nowIso,
+        lastLogin: userData.lastLogin || nowIso,
       };
       env.data.users.push(newUser);
       env.deletedUserIds = (env.deletedUserIds || []).filter(id => id !== newUser.id);
+      appendServerAudit(
+        env.data,
+        newUser,
+        newUser.id,
+        'Usuário Criado na Gestão Central',
+        'user',
+        newUser.id,
+        `Usuário ${newUser.name} (${newUser.role.toUpperCase()}) gravado no banco central.`,
+        req.ip
+      );
       env.revision += 1;
-      env.updatedAt = new Date().toISOString();
+      env.updatedAt = nowIso;
       writeDbEnvelope(env);
       broadcastDbUpdate(env.revision, env.updatedAt, 'user_created');
       res.status(201).json({ ok: true, user: newUser, revision: env.revision, updatedAt: env.updatedAt, data: env.data });
     } catch (err) {
       console.error('Erro ao criar usuário via /api/users:', err);
       res.status(500).json({ ok: false, message: 'Erro ao salvar usuário no servidor.' });
+    }
+  });
+
+  // Importação em massa de usuários via planilha Excel (.xlsx) na Gestão Central
+  app.post('/api/users/import', express.json({ limit: '15mb' }), (req, res) => {
+    try {
+      const body = req.body as {
+        rows?: Array<Record<string, unknown>>;
+        mode?: 'skip_duplicates' | 'update_existing';
+        actorId?: string;
+      };
+      if (!body || !Array.isArray(body.rows) || body.rows.length === 0) {
+        res.status(400).json({ ok: false, message: 'Nenhuma linha válida encontrada na planilha enviada.' });
+        return;
+      }
+
+      const mode = body.mode === 'update_existing' ? 'update_existing' : 'skip_duplicates';
+      const env = ensureDbEnvelope();
+      const actor = body.actorId ? env.data.users.find(u => u.id === body.actorId) : undefined;
+      loadServerGeoCache();
+
+      const seenPhonesInFile = new Set<string>();
+      const seenDocsInFile = new Set<string>();
+      let createdCount = 0;
+      let updatedCount = 0;
+      let skippedDuplicates = 0;
+      const errors: Array<{ row: number; name?: string; phone?: string; reason: string }> = [];
+      const duplicateDetails: Array<{ row: number; name?: string; phone?: string; reason: string }> = [];
+
+      const normalizeRoleValue = (raw: unknown): UserRole | null => {
+        const s = String(raw || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .trim()
+          .toLowerCase();
+        if (!s || s === 'cliente' || s === 'comprador' || s === 'client') return 'cliente';
+        if (s === 'fornecedor' || s === 'fornecedor / prestador' || s === 'supplier' || s === 'loja') return 'fornecedor';
+        if (s === 'admin' || s === 'administrador' || s === 'administrador master') return 'admin';
+        return null;
+      };
+
+      const normalizeStatusValue = (raw: unknown, role: UserRole): UserStatus | null => {
+        const s = String(raw || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .trim()
+          .toLowerCase();
+        if (!s) return role === 'fornecedor' ? 'pendente' : 'ativo';
+        if (s === 'ativo' || s === 'aprovado' || s === 'liberado') return 'ativo';
+        if (s === 'pendente' || s === 'aguardando') return 'pendente';
+        if (s === 'bloqueado' || s === 'inativo' || s === 'suspenso') return 'bloqueado';
+        return null;
+      };
+
+      const normalizeTierValue = (raw: unknown): SupplierTier | undefined => {
+        const s = String(raw || '').trim().toLowerCase();
+        if (!s) return undefined;
+        if (s === 'opcao_1' || s === '1' || s.includes('1ª') || s.includes('1a')) return 'opcao_1';
+        if (s === 'opcao_2' || s === '2' || s.includes('2ª') || s.includes('2a')) return 'opcao_2';
+        if (s === 'opcao_3' || s === '3' || s.includes('3ª') || s.includes('3a')) return 'opcao_3';
+        return undefined;
+      };
+
+      const nowIso = new Date().toISOString();
+
+      body.rows.forEach((rawRow, idx) => {
+        const rowNum = Number(rawRow.rowNumber) || idx + 2;
+        const name = String(rawRow.name || '').trim();
+        const rawPhone = String(rawRow.phone || '').trim();
+        const cleanPhone = normalizeBrPhoneDigits(rawPhone);
+        const role = normalizeRoleValue(rawRow.role);
+        const rawDoc = String(rawRow.document || '').trim();
+        const cleanDoc = rawDoc.replace(/\D/g, '');
+        const rawPassword = String(rawRow.password || '').trim();
+        const isMaskedPassword =
+          !rawPassword ||
+          rawPassword.startsWith('***') ||
+          rawPassword.toUpperCase() === 'PROTEGIDA' ||
+          rawPassword.toUpperCase() === 'MANTIDA';
+
+        if (name.length < 2) {
+          errors.push({ row: rowNum, name, phone: rawPhone, reason: 'Nome completo inválido ou vazio (mín. 2 caracteres).' });
+          return;
+        }
+        if (!cleanPhone || cleanPhone.length < 10 || cleanPhone.length > 11) {
+          errors.push({ row: rowNum, name, phone: rawPhone, reason: 'Telefone celular inválido (informe DDD + número com 10 ou 11 dígitos).' });
+          return;
+        }
+        if (!role) {
+          errors.push({ row: rowNum, name, phone: cleanPhone, reason: `Perfil inválido "${String(rawRow.role || '')}". Use: cliente, fornecedor ou admin.` });
+          return;
+        }
+        const status = normalizeStatusValue(rawRow.status, role);
+        if (!status) {
+          errors.push({ row: rowNum, name, phone: cleanPhone, reason: `Status inválido "${String(rawRow.status || '')}". Use: ativo, pendente ou bloqueado.` });
+          return;
+        }
+        if (cleanDoc.length > 0 && cleanDoc.length !== 11 && cleanDoc.length !== 14) {
+          errors.push({ row: rowNum, name, phone: cleanPhone, reason: 'CPF/CNPJ inválido (deve ter 11 dígitos para CPF ou 14 dígitos para CNPJ).' });
+          return;
+        }
+
+        if (seenPhonesInFile.has(cleanPhone)) {
+          skippedDuplicates += 1;
+          duplicateDetails.push({ row: rowNum, name, phone: cleanPhone, reason: 'Celular duplicado dentro da própria planilha (linha ignorada).' });
+          return;
+        }
+        if (cleanDoc.length >= 11 && seenDocsInFile.has(cleanDoc)) {
+          skippedDuplicates += 1;
+          duplicateDetails.push({ row: rowNum, name, phone: cleanPhone, reason: 'CPF/CNPJ duplicado dentro da própria planilha (linha ignorada).' });
+          return;
+        }
+
+        seenPhonesInFile.add(cleanPhone);
+        if (cleanDoc.length >= 11) seenDocsInFile.add(cleanDoc);
+
+        const phoneMatch = env.data.users.find(u => brPhonesMatch(u.phone, cleanPhone));
+        const docMatch =
+          cleanDoc.length >= 11
+            ? env.data.users.find(u => (u.document || '').replace(/\D/g, '') === cleanDoc)
+            : undefined;
+
+        if (phoneMatch && docMatch && phoneMatch.id !== docMatch.id) {
+          errors.push({
+            row: rowNum,
+            name,
+            phone: cleanPhone,
+            reason: 'Conflito de integridade: celular pertence a um usuário e CPF/CNPJ pertence a outro usuário no sistema.',
+          });
+          return;
+        }
+
+        const existingUser = phoneMatch || docMatch;
+
+        const cleanCep = cleanCepDigits(String(rawRow.cep || ''));
+        if (String(rawRow.cep || '').trim() && cleanCep.length !== 8) {
+          errors.push({ row: rowNum, name, phone: cleanPhone, reason: 'CEP inválido (informe 8 dígitos).' });
+          return;
+        }
+
+        const cachedCep = cleanCep.length === 8 ? serverGeoMemCache.get(cleanCep) : undefined;
+        const resolvedCoords = cachedCep
+          ? cachedCep.coordinates
+          : cleanCep.length === 8
+          ? estimateCoordinatesFromCep(cleanCep, String(rawRow.state || 'SP'))
+          : existingUser?.coordinates;
+        const resolvedPrecision: User['coordinatesPrecision'] = cachedCep
+          ? 'exact_cep'
+          : cleanCep.length === 8
+          ? 'cep_prefix'
+          : existingUser?.coordinatesPrecision;
+
+        const city = String(rawRow.city || cachedCep?.city || existingUser?.address?.city || '').trim();
+        const state = String(rawRow.state || cachedCep?.state || existingUser?.address?.state || '').trim().toUpperCase().slice(0, 2);
+        const neighborhood = String(rawRow.neighborhood || cachedCep?.neighborhood || existingUser?.address?.neighborhood || '').trim();
+        const street = String(rawRow.street || cachedCep?.street || existingUser?.address?.street || '').trim();
+        const number = String(rawRow.number || existingUser?.address?.number || '').trim();
+        const complement = String(rawRow.complement || existingUser?.address?.complement || '').trim();
+        const companyName = String(rawRow.companyName || '').trim();
+        const rawPersonType = String(rawRow.personType || '').trim().toUpperCase();
+        const personType: 'PF' | 'PJ' =
+          rawPersonType === 'PJ' || cleanDoc.length === 14
+            ? 'PJ'
+            : rawPersonType === 'PF' || cleanDoc.length === 11
+            ? 'PF'
+            : existingUser?.personType || (role === 'fornecedor' ? 'PJ' : 'PF');
+
+        const radiusNum = Number(rawRow.serviceRadiusKm);
+        const parsedRadius = Number.isFinite(radiusNum) && radiusNum > 0 ? Math.min(2000, Math.round(radiusNum)) : undefined;
+        const parsedTier = normalizeTierValue(rawRow.supplierTier);
+        const gatewayProviderRaw = String(rawRow.gatewayProvider || '').trim().toLowerCase();
+        const gatewayProvider: PaymentGatewayProvider | undefined =
+          gatewayProviderRaw === 'mercadopago'
+            ? 'mercadopago'
+            : gatewayProviderRaw === 'asaas'
+            ? 'asaas'
+            : existingUser?.gatewayProvider;
+        const gatewayPixKey = String(rawRow.bankAccountOrPix || '').trim() || existingUser?.bankAccountOrPix;
+        const gatewayWalletId = String(rawRow.gatewayWalletId || '').trim() || existingUser?.gatewayWalletId;
+
+        if (existingUser) {
+          if (mode === 'skip_duplicates') {
+            skippedDuplicates += 1;
+            duplicateDetails.push({
+              row: rowNum,
+              name,
+              phone: cleanPhone,
+              reason: `Cadastro já existente no sistema (${existingUser.name}) — preservado sem duplicar.`,
+            });
+            return;
+          }
+
+          // Modo update_existing: atualiza dados cadastrais e NUNCA sobrescreve senha com célula mascarada/vazia
+          if (!isMaskedPassword && rawPassword.length < 4) {
+            errors.push({
+              row: rowNum,
+              name,
+              phone: cleanPhone,
+              reason: 'Nova senha informada para atualização deve ter no mínimo 4 caracteres (ou deixe ***PROTEGIDA*** para manter a atual).',
+            });
+            return;
+          }
+
+          existingUser.name = name;
+          existingUser.phone = cleanPhone;
+          existingUser.role = role;
+          existingUser.status = status;
+          existingUser.personType = personType;
+          if (rawDoc) existingUser.document = rawDoc;
+          if (role === 'fornecedor') {
+            existingUser.companyName = companyName || existingUser.companyName || name;
+            if (parsedRadius !== undefined) existingUser.serviceRadiusKm = parsedRadius;
+            if (parsedTier) {
+              existingUser.supplierTier = parsedTier;
+              existingUser.isClassifiedByAdmin = status === 'ativo';
+            }
+            if (gatewayProvider) existingUser.gatewayProvider = gatewayProvider;
+            if (gatewayPixKey) {
+              existingUser.bankAccountOrPix = gatewayPixKey;
+              existingUser.gatewayPixKey = gatewayPixKey;
+            }
+            if (gatewayWalletId) {
+              existingUser.gatewayWalletId = gatewayWalletId;
+              existingUser.gatewayAccountStatus = 'ativa';
+            }
+          }
+          if (!isMaskedPassword && rawPassword.length >= 4) {
+            existingUser.password = rawPassword;
+          }
+          if (cleanCep.length === 8 || city || street || neighborhood) {
+            existingUser.address = {
+              cep: cleanCep.length === 8 ? formatCep(cleanCep) : existingUser.address?.cep || '',
+              city: city || existingUser.address?.city || '',
+              state: state || existingUser.address?.state || '',
+              neighborhood: neighborhood || existingUser.address?.neighborhood || '',
+              street: street || existingUser.address?.street || '',
+              number: number || existingUser.address?.number || 'S/N',
+              complement: complement || existingUser.address?.complement || '',
+              coordinates: resolvedCoords,
+              coordinatesPrecision: resolvedPrecision,
+            };
+            if (resolvedCoords) {
+              existingUser.coordinates = resolvedCoords;
+              existingUser.coordinatesPrecision = resolvedPrecision;
+            }
+          }
+          updatedCount += 1;
+          return;
+        }
+
+        // Novo usuário
+        if (isMaskedPassword || rawPassword.length < 4) {
+          errors.push({
+            row: rowNum,
+            name,
+            phone: cleanPhone,
+            reason: 'Novo usuário exige uma Senha Inicial válida (mínimo 4 caracteres; não use ***PROTEGIDA***).',
+          });
+          return;
+        }
+
+        const newId = `usr_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`;
+        const newUser: User = {
+          id: newId,
+          phone: cleanPhone,
+          name,
+          email: '',
+          role,
+          personType,
+          document: rawDoc || '',
+          companyName: role === 'fornecedor' ? companyName || name : undefined,
+          status,
+          password: rawPassword,
+          address:
+            cleanCep.length === 8 || city || street
+              ? {
+                  cep: cleanCep.length === 8 ? formatCep(cleanCep) : '',
+                  city: city || 'São Paulo',
+                  state: state || 'SP',
+                  neighborhood: neighborhood || 'Centro',
+                  street: street || 'Área Urbana (CEP)',
+                  number: number || 'S/N',
+                  complement: complement || undefined,
+                  coordinates: resolvedCoords,
+                  coordinatesPrecision: resolvedPrecision,
+                }
+              : undefined,
+          coordinates: resolvedCoords,
+          coordinatesPrecision: resolvedPrecision,
+          serviceRadiusKm: role === 'fornecedor' ? (parsedRadius ?? 50) : 0,
+          citiesCovered: city ? [city] : [],
+          equipmentTypesSupplied: role === 'fornecedor' ? ['carro'] : undefined,
+          supplierTier: role === 'fornecedor' ? parsedTier : undefined,
+          isClassifiedByAdmin: role === 'fornecedor' ? Boolean(parsedTier && status === 'ativo') : undefined,
+          isAvailableForOrders: role === 'fornecedor' && status === 'ativo',
+          supplierPaymentType: role === 'fornecedor' ? 'compe_split' : undefined,
+          bankAccountOrPix: role === 'fornecedor' ? gatewayPixKey : undefined,
+          gatewayProvider: role === 'fornecedor' ? gatewayProvider || 'asaas' : undefined,
+          gatewayPixKey: role === 'fornecedor' ? gatewayPixKey : undefined,
+          gatewayWalletId: role === 'fornecedor' ? gatewayWalletId : undefined,
+          gatewayAccountStatus:
+            role === 'fornecedor'
+              ? gatewayWalletId
+                ? 'ativa'
+                : gatewayPixKey
+                ? 'em_analise'
+                : 'nao_configurada'
+              : undefined,
+          rating: 5.0,
+          totalRatings: 0,
+          totalSales: 0,
+          createdAt: nowIso,
+          lastLogin: nowIso,
+        };
+
+        env.data.users.push(newUser);
+        env.deletedUserIds = (env.deletedUserIds || []).filter(id => id !== newUser.id);
+        createdCount += 1;
+      });
+
+      if (createdCount > 0 || updatedCount > 0) {
+        appendServerAudit(
+          env.data,
+          actor,
+          actor?.id || 'admin_master_01',
+          'Importação de Usuários via Planilha Excel',
+          'user',
+          'excel_import',
+          `Importação Excel (${mode}): ${createdCount} criado(s), ${updatedCount} atualizado(s), ${skippedDuplicates} duplicidade(s) ignorada(s), ${errors.length} erro(s).`,
+          req.ip
+        );
+        env.revision += 1;
+        env.updatedAt = nowIso;
+        writeDbEnvelope(env);
+        broadcastDbUpdate(env.revision, env.updatedAt, 'users_imported');
+      }
+
+      res.json({
+        ok: true,
+        createdCount,
+        updatedCount,
+        skippedDuplicates,
+        errors,
+        duplicateDetails,
+        revision: env.revision,
+        updatedAt: env.updatedAt,
+        data: env.data,
+      });
+    } catch (err) {
+      console.error('Erro na importação de planilha de usuários:', err);
+      res.status(500).json({ ok: false, message: 'Erro interno ao processar planilha de usuários.' });
     }
   });
 
@@ -1323,12 +1756,15 @@ async function startServer() {
 
       let cepGeoResult: Awaited<ReturnType<typeof resolveExactCepGeoOnServer>> | null = null;
       if (updates.address?.cep && isValidCep(updates.address.cep) && updates.coordinatesPrecision !== 'gps') {
-        cepGeoResult = await resolveExactCepGeoOnServer(updates.address.cep, {
-          street: updates.address.street,
-          neighborhood: updates.address.neighborhood,
-          city: updates.address.city,
-          state: updates.address.state,
-        });
+        cepGeoResult = await Promise.race([
+          resolveExactCepGeoOnServer(updates.address.cep, {
+            street: updates.address.street,
+            neighborhood: updates.address.neighborhood,
+            city: updates.address.city,
+            state: updates.address.state,
+          }),
+          new Promise<null>(resolve => setTimeout(() => resolve(null), 1500)),
+        ]);
       }
 
       const env = ensureDbEnvelope();
@@ -1336,6 +1772,28 @@ async function startServer() {
       if (!target) {
         res.status(404).json({ ok: false, message: 'Usuário não encontrado.' });
         return;
+      }
+
+      if (updates.phone) {
+        const nextPhone = normalizeBrPhoneDigits(updates.phone) || updates.phone.replace(/\D/g, '');
+        if (nextPhone.length >= 10) {
+          const dupPhone = env.data.users.find(u => u.id !== targetId && brPhonesMatch(u.phone, nextPhone));
+          if (dupPhone) {
+            res.status(409).json({ ok: false, message: 'Já existe outro usuário cadastrado com este celular.' });
+            return;
+          }
+        }
+      }
+
+      if (updates.document) {
+        const nextDoc = updates.document.replace(/\D/g, '');
+        if (nextDoc.length >= 11) {
+          const dupDoc = env.data.users.find(u => u.id !== targetId && (u.document || '').replace(/\D/g, '') === nextDoc);
+          if (dupDoc) {
+            res.status(409).json({ ok: false, message: 'Já existe outro usuário cadastrado com este CPF/CNPJ.' });
+            return;
+          }
+        }
       }
 
       const prevCep = cleanCepDigits(target.address?.cep);
@@ -1354,12 +1812,25 @@ async function startServer() {
           target.address.coordinates = cepGeoResult.coordinates;
           target.address.coordinatesPrecision = cepGeoResult.coordinatesPrecision;
         }
+      } else if (
+        updates.address?.cep &&
+        isValidCep(updates.address.cep) &&
+        !target.coordinates &&
+        target.coordinatesPrecision !== 'gps'
+      ) {
+        const est = estimateCoordinatesFromCep(updates.address.cep, updates.address.state);
+        target.coordinates = est;
+        target.coordinatesPrecision = 'cep_prefix';
+        if (target.address) {
+          target.address.coordinates = est;
+          target.address.coordinatesPrecision = 'cep_prefix';
+        }
       }
       env.revision += 1;
       env.updatedAt = new Date().toISOString();
       writeDbEnvelope(env);
       broadcastDbUpdate(env.revision, env.updatedAt, 'user_updated');
-      res.json({ ok: true, user: target, revision: env.revision, updatedAt: env.updatedAt });
+      res.json({ ok: true, user: target, revision: env.revision, updatedAt: env.updatedAt, data: env.data });
     } catch (err) {
       console.error('Erro ao atualizar usuário via PATCH /api/users/:id:', err);
       res.status(500).json({ ok: false, message: 'Erro ao atualizar usuário no servidor.' });
@@ -1470,6 +1941,27 @@ async function startServer() {
       const requestNumber =
         incomingReq.requestNumber || `CMP-${Math.floor(10000 + Math.random() * 90000)}`;
 
+      const normalizedMainPhotos = Array.isArray(incomingReq.mediaUrls)
+        ? incomingReq.mediaUrls.filter((u): u is string => typeof u === 'string' && u.trim().length > 0).slice(0, 5)
+        : incomingReq.mediaUrl
+        ? [incomingReq.mediaUrl]
+        : [];
+      const normalizedExtraParts: PartRequestExtraPart[] | undefined = Array.isArray(incomingReq.extraParts)
+        ? incomingReq.extraParts
+            .filter(ep => ep && ep.partName)
+            .map((ep, idx) => ({
+              id: ep.id || `ep_${Date.now()}_${idx}`,
+              partName: String(ep.partName).trim(),
+              partCategory: String(ep.partCategory || incomingReq.partCategory || 'Peça').trim(),
+              oemCode: ep.oemCode ? String(ep.oemCode).trim() : undefined,
+              characteristics: ep.characteristics ? String(ep.characteristics).trim() : undefined,
+              position: ep.position ? String(ep.position).trim() : undefined,
+              mediaUrls: Array.isArray(ep.mediaUrls)
+                ? ep.mediaUrls.filter((u): u is string => typeof u === 'string' && u.trim().length > 0).slice(0, 3)
+                : [],
+            }))
+        : undefined;
+
       const newRequest: PartRequest = {
         ...incomingReq,
         id: requestId,
@@ -1477,6 +1969,10 @@ async function startServer() {
         customerId,
         customerName: customer?.name || incomingReq.customerName || 'Cliente AUTO SHOP',
         customerPhone: customer?.phone || incomingReq.customerPhone || '',
+        mediaUrl: normalizedMainPhotos[0] || incomingReq.mediaUrl || undefined,
+        mediaUrls: normalizedMainPhotos,
+        mediaType: normalizedMainPhotos.length > 0 ? incomingReq.mediaType || 'photo' : incomingReq.mediaType,
+        extraParts: normalizedExtraParts,
         deliveryAddress: {
           ...incomingReq.deliveryAddress,
           cep: formatCep(incomingReq.deliveryAddress.cep || ''),
@@ -2108,10 +2604,125 @@ async function startServer() {
         revision: nextEnvelope.revision,
         updatedAt: nextEnvelope.updatedAt,
         client_ads_settings: nextEnvelope.data.client_ads_settings,
+        data: nextEnvelope.data,
       });
     } catch (err) {
       console.error('Erro ao salvar anúncios dos clientes:', err);
       res.status(500).json({ ok: false, message: 'Falha ao gravar anúncios no servidor.' });
+    }
+  });
+
+  // ============================================================================
+  // ROTAS ATÔMICAS DE CHAT EM TEMPO REAL (Cliente <-> Fornecedor + Intervenção Admin)
+  // ============================================================================
+  app.post('/api/chat/messages', express.json({ limit: '12mb' }), (req, res) => {
+    try {
+      const body = req.body as Partial<ChatMessage>;
+      if (!body || !body.senderId || (!body.message?.trim() && !body.mediaUrl)) {
+        res.status(400).json({ ok: false, message: 'Mensagem inválida ou vazia.' });
+        return;
+      }
+
+      const env = ensureDbEnvelope();
+      const sender = env.data.users.find(u => u.id === body.senderId);
+      const nowIso = new Date().toISOString();
+      const msgId = body.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+      const existing = env.data.chat_messages.find(m => m.id === msgId);
+      if (existing) {
+        res.json({ ok: true, chatMessage: existing, revision: env.revision, updatedAt: env.updatedAt, data: env.data });
+        return;
+      }
+
+      const newMsg: ChatMessage = {
+        id: msgId,
+        requestId: body.requestId,
+        orderId: body.orderId,
+        requestNumber: body.requestNumber,
+        senderId: body.senderId,
+        senderName: body.senderName || sender?.companyName || sender?.name || 'Usuário',
+        senderRole: body.senderRole || sender?.role || 'cliente',
+        recipientId: body.recipientId,
+        message: (body.message || '').trim(),
+        mediaUrl: body.mediaUrl,
+        isAdminIntervention: Boolean(body.isAdminIntervention || sender?.role === 'admin'),
+        isSac: Boolean(body.isSac),
+        readByUserIds: [body.senderId],
+        createdAt: body.createdAt || nowIso,
+      };
+
+      env.data.chat_messages.push(newMsg);
+
+      appendServerAudit(
+        env.data,
+        sender,
+        newMsg.senderId,
+        newMsg.isAdminIntervention ? 'Intervenção do Admin no Chat' : 'Mensagem de Chat Enviada',
+        'chat',
+        newMsg.orderId || newMsg.requestId || newMsg.id,
+        `${newMsg.senderRole.toUpperCase()} (${newMsg.senderName}) enviou mensagem${newMsg.requestNumber ? ` no chamado ${newMsg.requestNumber}` : ''}${newMsg.mediaUrl ? ' [com foto anexa]' : ''}.`,
+        req.ip
+      );
+
+      env.revision += 1;
+      env.updatedAt = nowIso;
+      writeDbEnvelope(env);
+      broadcastDbUpdate(env.revision, env.updatedAt, 'chat_message');
+
+      res.status(201).json({
+        ok: true,
+        chatMessage: newMsg,
+        revision: env.revision,
+        updatedAt: env.updatedAt,
+        data: env.data,
+      });
+    } catch (err) {
+      console.error('Erro ao gravar mensagem de chat:', err);
+      res.status(500).json({ ok: false, message: 'Erro interno ao enviar mensagem no chat.' });
+    }
+  });
+
+  app.post('/api/chat/read', express.json({ limit: '1mb' }), (req, res) => {
+    try {
+      const body = req.body as {
+        userId?: string;
+        requestId?: string;
+        orderId?: string;
+        isSac?: boolean;
+      };
+      if (!body?.userId) {
+        res.status(400).json({ ok: false, message: 'Usuário obrigatório para marcar leitura.' });
+        return;
+      }
+
+      const env = ensureDbEnvelope();
+      let changed = false;
+      env.data.chat_messages.forEach(msg => {
+        const matchesThread =
+          (body.isSac && msg.isSac) ||
+          (body.orderId && msg.orderId === body.orderId) ||
+          (body.requestId && msg.requestId === body.requestId);
+        if (matchesThread && msg.senderId !== body.userId) {
+          const readBy = new Set(msg.readByUserIds || []);
+          if (!readBy.has(body.userId!)) {
+            readBy.add(body.userId!);
+            msg.readByUserIds = Array.from(readBy);
+            changed = true;
+          }
+        }
+      });
+
+      if (changed) {
+        env.revision += 1;
+        env.updatedAt = new Date().toISOString();
+        writeDbEnvelope(env);
+        broadcastDbUpdate(env.revision, env.updatedAt, 'chat_read');
+      }
+
+      res.json({ ok: true, changed, revision: env.revision, updatedAt: env.updatedAt, data: env.data });
+    } catch (err) {
+      console.error('Erro ao marcar chat como lido:', err);
+      res.status(500).json({ ok: false, message: 'Erro ao atualizar leitura do chat.' });
     }
   });
 

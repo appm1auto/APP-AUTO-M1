@@ -3,19 +3,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   X,
   Send,
   Camera,
   ShieldCheck,
-  Clock,
   UserCheck,
   Store,
-  Eye,
-  CheckCircle2
+  Lock,
+  Loader2
 } from 'lucide-react';
 import { db } from '../../services/db';
+import {
+  isOrderIdentityUnlocked,
+  getMaskedCounterpartyLabel,
+} from '../../services/rbac';
 import { User, ChatMessage } from '../../types';
 
 interface OrderChatModalProps {
@@ -42,63 +45,102 @@ export const OrderChatModal: React.FC<OrderChatModalProps> = ({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [attachedMediaUrl, setAttachedMediaUrl] = useState('');
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [isSending, setIsSending] = useState(false);
   const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const loadMessages = () => {
+  const linkedOrder = orderId
+    ? db.getOrderById(orderId)
+    : db.getOrders().find(o => o.requestId === requestId);
+  const identityUnlocked = isOrderIdentityUnlocked(linkedOrder, currentUser.role);
+
+  const isCounterparty = otherPartyRole === 'cliente' || otherPartyRole === 'fornecedor';
+  const shouldMaskHeader = isCounterparty && !identityUnlocked;
+  const safeOtherPartyName = shouldMaskHeader
+    ? getMaskedCounterpartyLabel(
+        otherPartyRole === 'fornecedor' ? 'fornecedor' : 'cliente',
+        linkedOrder
+          ? (otherPartyRole === 'fornecedor' ? linkedOrder.supplierId : linkedOrder.customerId)
+          : requestId
+      )
+    : otherPartyName;
+  const safeOtherPartyAvatar = shouldMaskHeader ? undefined : otherPartyAvatar;
+
+  const refreshMessages = useCallback(() => {
     db.markThreadAsRead(currentUser.id, { requestId, orderId });
     const list = db.getChatMessages({ requestId, orderId });
-    setMessages(list);
-  };
+    setMessages([...list]);
+  }, [currentUser.id, requestId, orderId]);
 
   useEffect(() => {
-    loadMessages();
+    refreshMessages();
     const unsub = db.subscribe(() => {
-      db.markThreadAsRead(currentUser.id, { requestId, orderId });
-      const list = db.getChatMessages({ requestId, orderId });
-      setMessages(list);
+      refreshMessages();
     });
+    const onIncomingChat = () => {
+      refreshMessages();
+    };
+    window.addEventListener('compe:chat_message', onIncomingChat);
     return () => {
       unsub();
+      window.removeEventListener('compe:chat_message', onIncomingChat);
     };
-  }, [requestId, orderId, currentUser.id]);
+  }, [refreshMessages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages.length]);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        if (event.target?.result) {
-          setAttachedMediaUrl(event.target.result as string);
-        }
-      };
-      reader.readAsDataURL(file);
+    if (!file) return;
+    setUploadingPhoto(true);
+    try {
+      const res = await db.compressAndUploadImageFile(file, 1024, 0.8);
+      if (res.ok && res.url) {
+        setAttachedMediaUrl(res.url);
+      } else {
+        const reader = new FileReader();
+        reader.onload = event => {
+          if (typeof event.target?.result === 'string') {
+            setAttachedMediaUrl(event.target.result);
+          }
+        };
+        reader.readAsDataURL(file);
+      }
+    } finally {
+      setUploadingPhoto(false);
+      e.target.value = '';
     }
   };
 
-  const handleSendMessage = (e: React.FormEvent) => {
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() && !attachedMediaUrl) return;
-
-    db.sendChatMessage({
-      requestId,
-      orderId,
-      requestNumber,
-      senderId: currentUser.id,
-      senderName: currentUser.companyName || currentUser.name,
-      senderRole: currentUser.role,
-      message: inputText.trim(),
-      mediaUrl: attachedMediaUrl || undefined,
-      isAdminIntervention: false,
-    });
+    const text = inputText.trim();
+    const media = attachedMediaUrl;
+    if ((!text && !media) || isSending) return;
 
     setInputText('');
     setAttachedMediaUrl('');
+    setIsSending(true);
+    try {
+      await db.sendChatMessageRemote({
+        requestId,
+        orderId: orderId || linkedOrder?.id,
+        requestNumber,
+        senderId: currentUser.id,
+        senderName: currentUser.companyName || currentUser.name,
+        senderRole: currentUser.role,
+        message: text || 'Foto anexada',
+        mediaUrl: media || undefined,
+        isAdminIntervention: currentUser.role === 'admin',
+      });
+      refreshMessages();
+    } finally {
+      setIsSending(false);
+    }
   };
 
   return (
@@ -108,8 +150,8 @@ export const OrderChatModal: React.FC<OrderChatModalProps> = ({
         <div className="p-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/90 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl overflow-hidden bg-slate-200 dark:bg-slate-800 flex items-center justify-center shrink-0 border border-slate-300 dark:border-slate-700">
-              {otherPartyAvatar ? (
-                <img src={otherPartyAvatar} alt={otherPartyName} className="w-full h-full object-cover" />
+              {safeOtherPartyAvatar ? (
+                <img src={safeOtherPartyAvatar} alt={safeOtherPartyName} className="w-full h-full object-cover" />
               ) : otherPartyRole === 'fornecedor' ? (
                 <Store className="w-5 h-5 text-emerald-600" />
               ) : (
@@ -118,8 +160,8 @@ export const OrderChatModal: React.FC<OrderChatModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-1.5">
-                <strong className="text-sm font-black text-slate-900 dark:text-white truncate max-w-[180px]">
-                  {otherPartyName}
+                <strong className="text-sm font-black text-slate-900 dark:text-white truncate max-w-[190px]">
+                  {safeOtherPartyName}
                 </strong>
                 <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300">
                   {otherPartyRole}
@@ -139,14 +181,23 @@ export const OrderChatModal: React.FC<OrderChatModalProps> = ({
           </button>
         </div>
 
-        {/* Supervision Banner */}
+        {/* Supervision & Privacy Banner */}
         <div className="bg-purple-50 dark:bg-purple-950/40 px-3 py-1.5 border-b border-purple-100 dark:border-purple-900/50 flex items-center justify-between text-[11px] text-purple-700 dark:text-purple-300 font-semibold shrink-0">
           <span className="flex items-center gap-1.5">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            Supervisionado em tempo real pela moderação oficial AUTO SHOP.
+            <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+            Supervisionado em tempo real pela equipe AUTO SHOP.
           </span>
-          <span className="text-[10px] text-purple-500 uppercase">LGPD Segura</span>
+          <span className="text-[10px] text-purple-500 uppercase">Seguro</span>
         </div>
+
+        {!identityUnlocked && currentUser.role !== 'admin' && (
+          <div className="bg-amber-50 dark:bg-amber-950/40 px-3 py-1.5 border-b border-amber-200 dark:border-amber-900/50 flex items-center gap-1.5 text-[11px] text-amber-800 dark:text-amber-300 font-semibold shrink-0">
+            <Lock className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              Dados pessoais, WhatsApp e endereço completo permanecem protegidos até o fornecedor confirmar o recebimento em conta.
+            </span>
+          </div>
+        )}
 
         {/* Message Thread */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
@@ -163,6 +214,13 @@ export const OrderChatModal: React.FC<OrderChatModalProps> = ({
           ) : (
             messages.map(msg => {
               const isMine = msg.senderId === currentUser.id;
+              const isAdminMsg = msg.isAdminIntervention || msg.senderRole === 'admin';
+              const displaySenderName =
+                isMine || isAdminMsg || identityUnlocked || currentUser.role === 'admin'
+                  ? msg.senderName
+                  : msg.senderRole === 'fornecedor'
+                  ? getMaskedCounterpartyLabel('fornecedor', msg.senderId)
+                  : getMaskedCounterpartyLabel('cliente', msg.senderId);
 
               if (msg.isAdminIntervention) {
                 return (
@@ -171,13 +229,28 @@ export const OrderChatModal: React.FC<OrderChatModalProps> = ({
                       <ShieldCheck className="w-4 h-4 text-purple-600" />
                       <span>{msg.senderName}</span>
                       <span className="text-[9px] bg-purple-600 text-white px-1.5 py-0.5 rounded uppercase">
-                        Oficial
+                        Intervenção Admin
                       </span>
                     </div>
-                    <p className="text-xs text-purple-950 dark:text-purple-100 font-medium">
-                      {msg.message}
-                    </p>
-                    <span className="text-[10px] text-purple-400 block text-right mt-1">
+                    {msg.message && (
+                      <p className="text-xs text-purple-950 dark:text-purple-100 font-medium">
+                        {msg.message}
+                      </p>
+                    )}
+                    {msg.mediaUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setPreviewPhoto(msg.mediaUrl || null)}
+                        className="rounded-xl overflow-hidden border border-purple-300 block cursor-pointer mt-2"
+                      >
+                        <img
+                          src={msg.mediaUrl}
+                          alt="Anexo Admin"
+                          className="max-h-40 w-auto object-cover"
+                        />
+                      </button>
+                    )}
+                    <span className="text-[10px] text-purple-500 block text-right mt-1">
                       {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </span>
                   </div>
@@ -199,7 +272,7 @@ export const OrderChatModal: React.FC<OrderChatModalProps> = ({
                     {!isMine && (
                       <div className="flex items-center gap-1.5">
                         <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400">
-                          {msg.senderName}
+                          {displaySenderName}
                         </span>
                         {msg.isSac && (
                           <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-red-600 text-white">
@@ -276,11 +349,12 @@ export const OrderChatModal: React.FC<OrderChatModalProps> = ({
           />
           <button
             type="button"
+            disabled={uploadingPhoto || isSending}
             onClick={() => fileInputRef.current?.click()}
-            className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+            className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer disabled:opacity-40"
             title="Tirar foto ou anexar imagem da peça"
           >
-            <Camera className="w-4 h-4" />
+            {uploadingPhoto ? <Loader2 className="w-4 h-4 animate-spin" /> : <Camera className="w-4 h-4" />}
           </button>
 
           <input
@@ -293,10 +367,10 @@ export const OrderChatModal: React.FC<OrderChatModalProps> = ({
 
           <button
             type="submit"
-            disabled={!inputText.trim() && !attachedMediaUrl}
+            disabled={(!inputText.trim() && !attachedMediaUrl) || isSending || uploadingPhoto}
             className="p-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white font-bold transition cursor-pointer shrink-0"
           >
-            <Send className="w-4 h-4" />
+            {isSending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
           </button>
         </form>
       </div>

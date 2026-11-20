@@ -17,6 +17,11 @@ import {
 } from 'lucide-react';
 import { OrderAndPayment } from '../../types';
 import { db } from '../../services/db';
+import {
+  isOrderIdentityUnlocked,
+  getMaskedCounterpartyLabel,
+  formatCityNeighborhood,
+} from '../../services/rbac';
 
 interface PackageShipModalProps {
   order: OrderAndPayment;
@@ -35,6 +40,12 @@ export const PackageShipModal: React.FC<PackageShipModalProps> = ({
   const isAlreadyShipped = order.deliveryStatus === 'a_caminho' || order.deliveryStatus === 'entregue';
   const req = db.getRequestById(order.requestId);
   const deliveryAddress = order.deliveryAddress || req?.deliveryAddress;
+  const identityUnlocked = isOrderIdentityUnlocked(order, 'fornecedor');
+  const supplierUser = db.getUserById(supplierId);
+  const matchedQuote = db.getQuotes(order.requestId).find(q => q.id === order.quoteId);
+  const distDetails = req ? db.getDistanceDetailsSupplierToRequest(supplierUser, req) : null;
+  const distKm = matchedQuote?.distanceKm ?? distDetails?.distanceKm ?? null;
+  const maskedCustomerLabel = getMaskedCounterpartyLabel('cliente', order.customerId);
 
   const [packagedPhotoUrl, setPackagedPhotoUrl] = useState<string>(
     order.packagedPhotoUrl || '/src/assets/images/compe_delivery_van_1793928395506.jpg'
@@ -59,7 +70,7 @@ export const PackageShipModal: React.FC<PackageShipModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (isAlreadyShipped) return; // Impede duplicidade
+    if (isAlreadyShipped || !identityUnlocked) return; // Impede duplicidade e envio sem confirmação em conta
 
     setSubmitting(true);
     db.updateOrderDelivery(order.id, supplierId, {
@@ -115,7 +126,25 @@ export const PackageShipModal: React.FC<PackageShipModalProps> = ({
             : 'Tire a foto da peça embalada, preencha os dados da NF-e e do entregador. Esta ação só pode ser feita uma vez.'}
         </p>
 
-        {deliveryAddress && (
+        {!identityUnlocked ? (
+          <div className="mt-3 p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 space-y-1.5 text-xs">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="font-black uppercase text-[10px] text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                <Lock className="w-3.5 h-3.5 text-amber-600" />
+                Dados Protegidos até Confirmação em Conta
+              </span>
+              <span className="font-mono font-black text-[11px] bg-emerald-600 text-white px-2 py-0.5 rounded">
+                {distKm !== null ? `${distKm.toFixed(1)} km reais` : 'Distância via CEP'}
+              </span>
+            </div>
+            <p className="font-bold text-slate-900 dark:text-white">
+              {maskedCustomerLabel} · {formatCityNeighborhood(deliveryAddress)}
+            </p>
+            <p className="text-[11px] text-amber-900 dark:text-amber-200">
+              Confirme primeiro que o pagamento entrou em sua conta no painel de pedidos para liberar rua, número, CEP, nome e WhatsApp do cliente e habilitar o despacho.
+            </p>
+          </div>
+        ) : deliveryAddress && (
           <div className="mt-3 p-3.5 rounded-2xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 space-y-1 text-xs">
             <div className="flex items-center justify-between">
               <span className="font-black uppercase text-[10px] text-blue-800 dark:text-blue-300 flex items-center gap-1.5">
@@ -316,11 +345,15 @@ export const PackageShipModal: React.FC<PackageShipModalProps> = ({
           {!isAlreadyShipped ? (
             <button
               type="submit"
-              disabled={submitting}
-              className="w-full py-3.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-black text-sm shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition active:scale-98"
+              disabled={submitting || !identityUnlocked}
+              className="w-full py-3.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-black text-sm shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2 transition active:scale-98 cursor-pointer"
             >
               <Truck className="w-4 h-4" />
-              <span>Confirmar Envio e Despachar Peça</span>
+              <span>
+                {!identityUnlocked
+                  ? 'Confirme o Pagamento em Conta Antes de Despachar'
+                  : 'Confirmar Envio e Despachar Peça'}
+              </span>
             </button>
           ) : (
             <button

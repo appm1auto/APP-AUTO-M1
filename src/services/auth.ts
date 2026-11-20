@@ -744,6 +744,8 @@ class AuthService {
   }> {
     const isSupplier = data.role === 'fornecedor';
 
+    const cleanDoc = (data.document || '').replace(/\D/g, '');
+
     // 1. Verifica duplicidade no servidor compartilhado se /api/users ou /api/db estiver acessível
     try {
       const usersRes = await fetch(apiUrl('/api/users'), {
@@ -759,6 +761,15 @@ class AuthService {
             message: 'Já existe uma conta cadastrada com este celular. Faça login com sua senha.',
           };
         }
+        if (cleanDoc.length >= 11) {
+          const dupDoc = usersJson.users.find(u => (u.document || '').replace(/\D/g, '') === cleanDoc);
+          if (dupDoc) {
+            return {
+              success: false,
+              message: 'Já existe uma conta cadastrada com este CPF/CNPJ. Faça login com sua senha.',
+            };
+          }
+        }
       }
     } catch {
       // ignora se /api/users não estiver disponível
@@ -769,6 +780,12 @@ class AuthService {
       return {
         success: false,
         message: 'Já existe uma conta cadastrada com este celular. Faça login com sua senha.',
+      };
+    }
+    if (cleanDoc.length >= 11 && db.getUsers().some(u => (u.document || '').replace(/\D/g, '') === cleanDoc)) {
+      return {
+        success: false,
+        message: 'Já existe uma conta cadastrada com este CPF/CNPJ. Faça login com sua senha.',
       };
     }
 

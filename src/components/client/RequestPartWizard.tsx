@@ -42,6 +42,7 @@ interface ExtraPart {
   oemCode: string;
   characteristics: string;
   position: string;
+  mediaUrls: string[];
 }
 
 interface RequestPartWizardProps {
@@ -86,8 +87,9 @@ export const RequestPartWizard: React.FC<RequestPartWizardProps> = ({
   const [partCharacteristics, setPartCharacteristics] = useState('Nova Original / 1ª Linha');
   const [partPosition, setPartPosition] = useState('Dianteiro / Ambos os lados');
   const [description, setDescription] = useState('');
-  const [mediaUrl, setMediaUrl] = useState(custom.defaultPartImageUrl || '/src/assets/images/compe_hero_autoparts_1793928394704.jpg');
-  const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
+  const [mainPhotos, setMainPhotos] = useState<string[]>([]);
+  const [uploadingPhotoTarget, setUploadingPhotoTarget] = useState<string | null>(null);
+  const [photoUploadError, setPhotoUploadError] = useState<string | null>(null);
 
   // Lista de peças extras no mesmo pedido
   const [extraParts, setExtraParts] = useState<ExtraPart[]>([]);
@@ -270,6 +272,67 @@ export const RequestPartWizard: React.FC<RequestPartWizardProps> = ({
     }
   };
 
+  // Helper de upload rápido de múltiplas fotos com compressão
+  const processSelectedImages = async (files: FileList | null, target: 'main' | string) => {
+    if (!files || files.length === 0) return;
+    setPhotoUploadError(null);
+    setUploadingPhotoTarget(target);
+    try {
+      const currentCount =
+        target === 'main'
+          ? mainPhotos.length
+          : (extraParts.find(p => p.id === target)?.mediaUrls.length || 0);
+      const maxAllowed = target === 'main' ? 5 : 3;
+      const availableSlots = Math.max(0, maxAllowed - currentCount);
+      if (availableSlots <= 0) {
+        setPhotoUploadError(
+          target === 'main'
+            ? 'Limite máximo de 5 fotos atingido na peça principal.'
+            : 'Limite máximo de 3 fotos atingido para esta peça adicional.'
+        );
+        return;
+      }
+
+      const selectedFiles = Array.from(files).slice(0, availableSlots);
+      const uploadedUrls: string[] = [];
+
+      for (const file of selectedFiles) {
+        const res = await db.compressAndUploadImageFile(file, 1280, 0.82);
+        if (res.ok && res.url) {
+          uploadedUrls.push(res.url);
+        } else {
+          // Fallback em Data URL caso upload falhe momentaneamente
+          const dataUrl = await new Promise<string | null>(resolve => {
+            const reader = new FileReader();
+            reader.onload = ev => resolve(typeof ev.target?.result === 'string' ? ev.target.result : null);
+            reader.onerror = () => resolve(null);
+            reader.readAsDataURL(file);
+          });
+          if (dataUrl) uploadedUrls.push(dataUrl);
+        }
+      }
+
+      if (uploadedUrls.length > 0) {
+        if (target === 'main') {
+          setMainPhotos(prev => [...prev, ...uploadedUrls].slice(0, 5));
+        } else {
+          setExtraParts(prev =>
+            prev.map(p =>
+              p.id === target
+                ? { ...p, mediaUrls: [...(p.mediaUrls || []), ...uploadedUrls].slice(0, 3) }
+                : p
+            )
+          );
+        }
+      }
+      if (files.length > availableSlots) {
+        setPhotoUploadError(`Apenas ${availableSlots} foto(s) adicionada(s) para respeitar o limite de ${maxAllowed}.`);
+      }
+    } finally {
+      setUploadingPhotoTarget(null);
+    }
+  };
+
   // Adiciona peça extra
   const handleAddExtraPart = () => {
     const newPart: ExtraPart = {
@@ -279,6 +342,7 @@ export const RequestPartWizard: React.FC<RequestPartWizardProps> = ({
       oemCode: '',
       characteristics: 'Nova Original / 1ª Linha',
       position: 'Dianteiro / Ambos os lados',
+      mediaUrls: [],
     };
     setExtraParts(prev => [...prev, newPart]);
   };
@@ -337,6 +401,7 @@ export const RequestPartWizard: React.FC<RequestPartWizardProps> = ({
     ].filter(Boolean).join('\n');
 
     try {
+      const primaryMedia = mainPhotos[0] || undefined;
       const newReq = await db.createPartRequestRemote(customerId, {
         vehicleType,
         vehicleBrand,
@@ -355,8 +420,18 @@ export const RequestPartWizard: React.FC<RequestPartWizardProps> = ({
         partSubcategory: partCategory,
         oemCode: oemCode || undefined,
         description: fullDescription || undefined,
-        mediaUrl,
-        mediaType,
+        mediaUrl: primaryMedia,
+        mediaUrls: mainPhotos,
+        mediaType: mainPhotos.length > 0 ? 'photo' : undefined,
+        extraParts: extraParts.map(ep => ({
+          id: ep.id,
+          partName: ep.partName || 'Peça adicional',
+          partCategory: ep.partCategory,
+          oemCode: ep.oemCode || undefined,
+          characteristics: ep.characteristics,
+          position: ep.position,
+          mediaUrls: (ep.mediaUrls || []).slice(0, 3),
+        })),
         clientGpsVerified: gpsConfirmed,
         deliveryAddress: {
           ...address,
@@ -720,55 +795,83 @@ export const RequestPartWizard: React.FC<RequestPartWizardProps> = ({
                 </div>
               )}
 
-              {/* Upload de foto */}
-              <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
-                <div className="flex items-center justify-between mb-2">
+              {/* Upload de até 5 fotos da peça principal */}
+              <div className="pt-3 border-t border-slate-200 dark:border-slate-700 space-y-2.5">
+                <div className="flex items-center justify-between flex-wrap gap-2">
                   <label className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                     <Camera className="w-4 h-4 text-blue-600" />
-                    <span>Foto da Peça</span>
+                    <span>Fotos da Peça Principal (até 5 fotos)</span>
                   </label>
+                  <span className={`text-[11px] font-black px-2 py-0.5 rounded-md ${
+                    mainPhotos.length >= 5
+                      ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
+                      : 'bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300'
+                  }`}>
+                    {mainPhotos.length} / 5 fotos
+                  </span>
                 </div>
-                <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-                  <div className="relative w-36 h-28 sm:w-44 sm:h-32 rounded-xl overflow-hidden border-2 border-slate-300 dark:border-slate-700 bg-slate-950 shrink-0">
-                    {mediaUrl ? (
-                      <img src={mediaUrl} alt="Foto" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center text-slate-500 text-xs">
-                        <Camera className="w-6 h-6" />
+
+                {photoUploadError && (
+                  <p className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                    {photoUploadError}
+                  </p>
+                )}
+
+                {mainPhotos.length > 0 && (
+                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+                    {mainPhotos.map((url, idx) => (
+                      <div key={`${url.slice(0, 24)}-${idx}`} className="relative aspect-square rounded-xl overflow-hidden border-2 border-slate-300 dark:border-slate-700 bg-slate-950 group">
+                        <img src={url} alt={`Peça principal ${idx + 1}`} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                        <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/75 text-white text-[9px] font-bold">
+                          #{idx + 1}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setMainPhotos(prev => prev.filter((_, i) => i !== idx))}
+                          className="absolute top-1 right-1 p-1 rounded-full bg-red-600 text-white hover:bg-red-700 shadow cursor-pointer"
+                          title="Remover foto"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
                       </div>
-                    )}
+                    ))}
                   </div>
+                )}
+
+                {mainPhotos.length < 5 && (
                   <div className="flex flex-wrap gap-2">
                     <label className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer">
                       <Camera className="w-3.5 h-3.5" />
-                      <span>Tirar Foto</span>
-                      <input type="file" accept="image/*" capture="environment" className="hidden"
+                      <span>{uploadingPhotoTarget === 'main' ? 'Enviando...' : 'Tirar Foto'}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        className="hidden"
+                        disabled={uploadingPhotoTarget === 'main'}
                         onChange={e => {
-                          const file = e.target.files?.[0];
-                          if (file) {
-                            const reader = new FileReader();
-                            reader.onload = ev => { if (ev.target?.result) setMediaUrl(ev.target.result as string); };
-                            reader.readAsDataURL(file);
-                          }
+                          void processSelectedImages(e.target.files, 'main');
+                          e.target.value = '';
                         }}
                       />
                     </label>
                     <label className="px-3.5 py-2 rounded-xl bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-800 dark:text-slate-200 font-bold text-xs flex items-center gap-1.5 cursor-pointer">
                       <Upload className="w-3.5 h-3.5" />
-                      <span>Anexar</span>
-                      <input type="file" accept="image/*" className="hidden"
+                      <span>{uploadingPhotoTarget === 'main' ? 'Enviando...' : `Anexar até ${5 - mainPhotos.length} foto(s)`}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        className="hidden"
+                        disabled={uploadingPhotoTarget === 'main'}
                         onChange={e => {
-                          const file = e.target.files?.[0];
-                          if (file) {
-                            const reader = new FileReader();
-                            reader.onload = ev => { if (ev.target?.result) setMediaUrl(ev.target.result as string); };
-                            reader.readAsDataURL(file);
-                          }
+                          void processSelectedImages(e.target.files, 'main');
+                          e.target.value = '';
                         }}
                       />
                     </label>
                   </div>
-                </div>
+                )}
               </div>
             </div>
 
@@ -824,6 +927,80 @@ export const RequestPartWizard: React.FC<RequestPartWizardProps> = ({
                       <option value="Outros / Não sei informar">Outros / Não sei informar</option>
                     </select>
                   </div>
+                </div>
+
+                {/* Upload de até 3 fotos por peça extra */}
+                <div className="pt-2 border-t border-orange-200 dark:border-orange-900/60 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                      <Camera className="w-3.5 h-3.5 text-orange-600" />
+                      <span>Fotos desta peça (até 3 fotos)</span>
+                    </label>
+                    <span className="text-[11px] font-black px-2 py-0.5 rounded-md bg-orange-100 text-orange-700 dark:bg-orange-950/60 dark:text-orange-300">
+                      {(part.mediaUrls || []).length} / 3 fotos
+                    </span>
+                  </div>
+
+                  {(part.mediaUrls || []).length > 0 && (
+                    <div className="grid grid-cols-3 gap-2">
+                      {(part.mediaUrls || []).map((url, photoIdx) => (
+                        <div key={`${part.id}-${photoIdx}`} className="relative aspect-square rounded-xl overflow-hidden border border-orange-300 dark:border-orange-800 bg-slate-950">
+                          <img src={url} alt={`${part.partName || 'Peça extra'} ${photoIdx + 1}`} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExtraParts(prev =>
+                                prev.map(p =>
+                                  p.id === part.id
+                                    ? { ...p, mediaUrls: (p.mediaUrls || []).filter((_, i) => i !== photoIdx) }
+                                    : p
+                                )
+                              )
+                            }
+                            className="absolute top-1 right-1 p-1 rounded-full bg-red-600 text-white hover:bg-red-700 shadow cursor-pointer"
+                            title="Remover foto"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {(part.mediaUrls || []).length < 3 && (
+                    <div className="flex flex-wrap gap-2">
+                      <label className="px-3 py-1.5 rounded-xl bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer">
+                        <Camera className="w-3.5 h-3.5" />
+                        <span>{uploadingPhotoTarget === part.id ? 'Enviando...' : 'Tirar Foto'}</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          className="hidden"
+                          disabled={uploadingPhotoTarget === part.id}
+                          onChange={e => {
+                            void processSelectedImages(e.target.files, part.id);
+                            e.target.value = '';
+                          }}
+                        />
+                      </label>
+                      <label className="px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-orange-300 dark:border-orange-800 text-orange-700 dark:text-orange-300 font-bold text-xs flex items-center gap-1.5 cursor-pointer">
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>{uploadingPhotoTarget === part.id ? 'Enviando...' : `Anexar até ${3 - (part.mediaUrls || []).length} foto(s)`}</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          className="hidden"
+                          disabled={uploadingPhotoTarget === part.id}
+                          onChange={e => {
+                            void processSelectedImages(e.target.files, part.id);
+                            e.target.value = '';
+                          }}
+                        />
+                      </label>
+                    </div>
+                  )}
                 </div>
               </div>
             ))}

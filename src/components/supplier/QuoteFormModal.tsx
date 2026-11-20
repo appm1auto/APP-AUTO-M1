@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { PartRequest, PartCondition, AvailabilityType, Quote, SupplierTier } from '../../types';
 import { db } from '../../services/db';
+import { formatCityNeighborhood } from '../../services/rbac';
 
 interface QuoteFormModalProps {
   request: PartRequest;
@@ -223,9 +224,44 @@ export const QuoteFormModal: React.FC<QuoteFormModalProps> = ({
                   : 'Calculando km...'}
               </strong>
             </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-500">Cidade / Bairro do Cliente:</span>
+              <strong className="text-slate-800 dark:text-slate-200">
+                {formatCityNeighborhood(request.deliveryAddress)}
+              </strong>
+            </div>
+            {(() => {
+              const mainPhotos =
+                request.mediaUrls && request.mediaUrls.length > 0
+                  ? request.mediaUrls
+                  : request.mediaUrl
+                  ? [request.mediaUrl]
+                  : [];
+              const extraPhotos = (request.extraParts || []).flatMap(ep => ep.mediaUrls || []);
+              const allPhotos = [...mainPhotos, ...extraPhotos];
+              if (allPhotos.length === 0) return null;
+              return (
+                <div className="pt-1">
+                  <span className="text-[10px] font-bold uppercase text-slate-500 block mb-1">
+                    Fotos anexadas pelo cliente ({allPhotos.length}):
+                  </span>
+                  <div className="flex gap-1.5 overflow-x-auto pb-1">
+                    {allPhotos.map((url, idx) => (
+                      <img
+                        key={`qf-photo-${idx}`}
+                        src={url}
+                        alt={`Peça ${idx + 1}`}
+                        className="w-14 h-14 rounded-lg object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                        referrerPolicy="no-referrer"
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
             <div className="p-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 text-[11px] text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
               <Lock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-              <span>CEP, rua, bairro e dados do cliente ficam ocultos até a confirmação do pagamento.</span>
+              <span>Nome, WhatsApp, CEP, rua e número do cliente ficam ocultos até a confirmação do recebimento em conta.</span>
             </div>
           </div>
         </div>
@@ -336,7 +372,7 @@ export const QuoteFormModal: React.FC<QuoteFormModalProps> = ({
                   </div>
                 )}
 
-                {/* EXCLUSIVO 3ª OPÇÃO: LOGO DO FORNECEDOR VISÍVEL NA TELA DO CLIENTE (§10) */}
+                {/* EXCLUSIVO 3ª OPÇÃO: LOGO LIBERADO PÓS-CONFIRMAÇÃO */}
                 {tier === 'opcao_3' && (
                   <div className="p-3.5 rounded-2xl bg-purple-50 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-900 flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
@@ -349,15 +385,15 @@ export const QuoteFormModal: React.FC<QuoteFormModalProps> = ({
                       </div>
                       <div>
                         <span className="text-xs font-black text-purple-900 dark:text-purple-200 block">
-                          Logo da sua Loja Ativo na Proposta
+                          Selo Nacional Direto (3ª Opção)
                         </span>
                         <span className="text-[11px] text-purple-700 dark:text-purple-300">
-                          {supplier?.companyName || supplier?.name} (Exclusividade 3ª Opção)
+                          {supplier?.companyName || supplier?.name} · Nome e logo exibidos ao cliente após confirmação do recebimento em conta
                         </span>
                       </div>
                     </div>
-                    <span className="text-[10px] font-black uppercase px-2 py-1 rounded-lg bg-purple-200 dark:bg-purple-900 text-purple-900 dark:text-purple-200">
-                      Visível ao Cliente
+                    <span className="text-[10px] font-black uppercase px-2 py-1 rounded-lg bg-purple-200 dark:bg-purple-900 text-purple-900 dark:text-purple-200 shrink-0">
+                      Pós-Confirmação
                     </span>
                   </div>
                 )}

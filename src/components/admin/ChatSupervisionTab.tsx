@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   MessageSquare,
   ShieldCheck,
@@ -11,80 +11,207 @@ import {
   Camera,
   Search,
   Filter,
-  AlertCircle,
   Eye,
   CheckCircle2,
   Clock,
   UserCheck,
-  Store
+  Store,
+  Loader2,
+  X
 } from 'lucide-react';
 import { db } from '../../services/db';
-import { User, ChatMessage } from '../../types';
+import { User } from '../../types';
 
 interface ChatSupervisionTabProps {
   adminUser: User;
 }
 
 export const ChatSupervisionTab: React.FC<ChatSupervisionTabProps> = ({ adminUser }) => {
-  const [selectedThreadRequestId, setSelectedThreadRequestId] = useState<string>('todos');
+  const [, setTick] = useState(0);
+  const [selectedThreadKey, setSelectedThreadKey] = useState<string>('todos');
+  const [targetThreadKey, setTargetThreadKey] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [intercessionText, setIntercessionText] = useState('');
+  const [intercessionMediaUrl, setIntercessionMediaUrl] = useState('');
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [sending, setSending] = useState(false);
   const [activeMediaPreview, setActiveMediaPreview] = useState<string | null>(null);
   const [sentSuccess, setSentSuccess] = useState(false);
+  const intercessionInputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Queries
+  useEffect(() => {
+    const refresh = () => setTick(t => t + 1);
+    const unsub = db.subscribe(refresh);
+    window.addEventListener('compe:chat_message', refresh);
+    return () => {
+      unsub();
+      window.removeEventListener('compe:chat_message', refresh);
+    };
+  }, []);
+
   const allMessages = db.getChatMessages();
   const requests = db.getRequests();
+  const orders = db.getOrders();
   const users = db.getUsers();
 
   useEffect(() => {
     db.markAllAdminMessagesRead(adminUser.id);
   }, [adminUser.id, allMessages.length]);
 
-  // Unique requests with messages
-  const requestsWithMessages = Array.from(
-    new Set(allMessages.map(m => m.requestId).filter(Boolean))
-  );
+  const getMessageThreadKey = (m: { requestId?: string; orderId?: string }) =>
+    m.requestId || m.orderId || 'geral';
 
-  // Filter messages
-  const filteredMessages = allMessages.filter(msg => {
-    if (selectedThreadRequestId !== 'todos' && msg.requestId !== selectedThreadRequestId) {
-      return false;
+  // Constroi índice único de conversas (chamados + pedidos + threads SAC)
+  const threadMap = new Map<
+    string,
+    {
+      key: string;
+      requestId: string;
+      orderId?: string;
+      requestNumber: string;
+      label: string;
+      lastMessageAt: string;
+      messageCount: number;
+      hasSac: boolean;
     }
-    if (searchQuery.trim() !== '') {
-      const q = searchQuery.toLowerCase();
-      return (
-        msg.message.toLowerCase().includes(q) ||
-        msg.senderName.toLowerCase().includes(q) ||
-        (msg.requestNumber && msg.requestNumber.toLowerCase().includes(q))
-      );
-    }
-    return true;
+  >();
+
+  requests.forEach(req => {
+    const linkedOrd = orders.find(o => o.requestId === req.id);
+    threadMap.set(req.id, {
+      key: req.id,
+      requestId: req.id,
+      orderId: linkedOrd?.id,
+      requestNumber: req.requestNumber || req.id,
+      label: `${req.requestNumber} · ${req.partName} (${req.customerName})`,
+      lastMessageAt: req.createdAt,
+      messageCount: 0,
+      hasSac: false,
+    });
   });
 
-  const handleSendIntercession = (e: React.FormEvent) => {
+  allMessages.forEach(m => {
+    const key = getMessageThreadKey(m);
+    const req = requests.find(r => r.id === m.requestId || r.id === key);
+    const ord = orders.find(o => o.id === m.orderId || o.requestId === key);
+    const existing = threadMap.get(key);
+    if (existing) {
+      existing.messageCount += 1;
+      if (new Date(m.createdAt).getTime() > new Date(existing.lastMessageAt).getTime()) {
+        existing.lastMessageAt = m.createdAt;
+      }
+      if (m.isSac) existing.hasSac = true;
+      if (!existing.orderId && m.orderId) existing.orderId = m.orderId;
+    } else {
+      threadMap.set(key, {
+        key,
+        requestId: m.requestId || req?.id || key,
+        orderId: m.orderId || ord?.id,
+        requestNumber: m.requestNumber || req?.requestNumber || ord?.orderNumber || key,
+        label: `${m.requestNumber || req?.requestNumber || ord?.orderNumber || key} · ${
+          req?.partName || ord?.partName || m.senderName
+        }`,
+        lastMessageAt: m.createdAt,
+        messageCount: 1,
+        hasSac: Boolean(m.isSac),
+      });
+    }
+  });
+
+  const threadsWithMessages = Array.from(threadMap.values())
+    .filter(t => t.messageCount > 0)
+    .sort((a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime());
+
+  const allTargetThreads = Array.from(threadMap.values()).sort(
+    (a, b) => new Date(b.lastMessageAt).getTime() - new Date(a.lastMessageAt).getTime()
+  );
+
+  const effectiveTargetKey =
+    (targetThreadKey && threadMap.has(targetThreadKey) ? targetThreadKey : '') ||
+    (selectedThreadKey !== 'todos' && threadMap.has(selectedThreadKey) ? selectedThreadKey : '') ||
+    threadsWithMessages[0]?.key ||
+    allTargetThreads[0]?.key ||
+    '';
+
+  const filteredMessages = [...allMessages]
+    .filter(msg => {
+      if (selectedThreadKey !== 'todos' && getMessageThreadKey(msg) !== selectedThreadKey) {
+        return false;
+      }
+      if (searchQuery.trim() !== '') {
+        const q = searchQuery.toLowerCase();
+        return (
+          msg.message.toLowerCase().includes(q) ||
+          msg.senderName.toLowerCase().includes(q) ||
+          (msg.requestNumber && msg.requestNumber.toLowerCase().includes(q))
+        );
+      }
+      return true;
+    })
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+  const handleFocusIntervention = (threadKey: string) => {
+    setSelectedThreadKey(threadKey);
+    setTargetThreadKey(threadKey);
+    setTimeout(() => {
+      intercessionInputRef.current?.focus();
+    }, 50);
+  };
+
+  const handlePhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingPhoto(true);
+    try {
+      const res = await db.compressAndUploadImageFile(file, 1024, 0.8);
+      if (res.ok && res.url) {
+        setIntercessionMediaUrl(res.url);
+      } else {
+        const reader = new FileReader();
+        reader.onload = ev => {
+          if (typeof ev.target?.result === 'string') {
+            setIntercessionMediaUrl(ev.target.result);
+          }
+        };
+        reader.readAsDataURL(file);
+      }
+    } finally {
+      setUploadingPhoto(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleSendIntercession = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!intercessionText.trim()) return;
+    const text = intercessionText.trim();
+    if ((!text && !intercessionMediaUrl) || sending) return;
 
-    const targetReqId = selectedThreadRequestId !== 'todos' 
-      ? selectedThreadRequestId 
-      : requests[0]?.id || 'req_corolla_45872';
+    const thread = effectiveTargetKey ? threadMap.get(effectiveTargetKey) : undefined;
+    const targetReqId = thread?.requestId || 'sac_geral';
+    const targetOrdId = thread?.orderId;
+    const targetReqNumber = thread?.requestNumber || 'SAC-ADMIN';
 
-    const req = requests.find(r => r.id === targetReqId);
+    setSending(true);
+    try {
+      await db.sendChatMessageRemote({
+        requestId: targetReqId,
+        orderId: targetOrdId,
+        requestNumber: targetReqNumber.startsWith('#') ? targetReqNumber : `#${targetReqNumber}`,
+        senderId: adminUser.id,
+        senderName: 'AUTO SHOP Mediação & Suporte Oficial',
+        senderRole: 'admin',
+        message: text || 'Anexo enviado pela moderação',
+        mediaUrl: intercessionMediaUrl || undefined,
+        isAdminIntervention: true,
+      });
 
-    db.sendChatMessage({
-      requestId: targetReqId,
-      requestNumber: req?.requestNumber ? `#${req.requestNumber}` : '#45872',
-      senderId: adminUser.id,
-      senderName: 'AUTO SHOP Mediação & Suporte Oficial',
-      senderRole: 'admin',
-      message: intercessionText.trim(),
-      isAdminIntervention: true,
-    });
-
-    setIntercessionText('');
-    setSentSuccess(true);
-    setTimeout(() => setSentSuccess(false), 3000);
+      setIntercessionText('');
+      setIntercessionMediaUrl('');
+      setSentSuccess(true);
+      setTimeout(() => setSentSuccess(false), 3000);
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
@@ -101,21 +228,59 @@ export const ChatSupervisionTab: React.FC<ChatSupervisionTabProps> = ({ adminUse
                 Supervisão de Comunicação & Intercessão Administrativa
               </h2>
               <p className="text-xs text-slate-500">
-                Acompanhamento em tempo real de mensagens e fotos trocadas entre clientes e fornecedores.
+                Todas as mensagens e fotos entre clientes e fornecedores aparecem aqui em tempo real com opção de intervenção imediata.
               </p>
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex items-center gap-2 text-xs flex-wrap">
           <span className="px-3 py-1.5 rounded-xl bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 font-bold">
-            Total de Mensagens: {allMessages.length}
+            Mensagens: {allMessages.length}
           </span>
           <span className="px-3 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 font-bold">
-            Intervenções do Admin: {allMessages.filter(m => m.isAdminIntervention).length}
+            Intervenções Admin: {allMessages.filter(m => m.isAdminIntervention).length}
           </span>
         </div>
       </div>
+
+      {/* Quick Conversation Pills */}
+      {threadsWithMessages.length > 0 && (
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          <button
+            type="button"
+            onClick={() => setSelectedThreadKey('todos')}
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition cursor-pointer ${
+              selectedThreadKey === 'todos'
+                ? 'bg-purple-600 text-white shadow-sm'
+                : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300'
+            }`}
+          >
+            Todas as Conversas ({allMessages.length})
+          </button>
+          {threadsWithMessages.map(t => (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => {
+                setSelectedThreadKey(t.key);
+                setTargetThreadKey(t.key);
+              }}
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition flex items-center gap-1.5 cursor-pointer ${
+                selectedThreadKey === t.key
+                  ? 'bg-purple-600 text-white shadow-sm'
+                  : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-purple-400'
+              }`}
+            >
+              <span>{t.requestNumber}</span>
+              <span className="opacity-75">({t.messageCount})</span>
+              {t.hasSac && (
+                <span className="text-[9px] px-1 py-0.5 rounded bg-red-600 text-white uppercase">SAC</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row gap-3 items-center justify-between">
@@ -133,19 +298,19 @@ export const ChatSupervisionTab: React.FC<ChatSupervisionTabProps> = ({ adminUse
         <div className="flex items-center gap-2 w-full sm:w-auto">
           <Filter className="w-4 h-4 text-slate-400" />
           <select
-            value={selectedThreadRequestId}
-            onChange={e => setSelectedThreadRequestId(e.target.value)}
+            value={selectedThreadKey}
+            onChange={e => {
+              setSelectedThreadKey(e.target.value);
+              if (e.target.value !== 'todos') setTargetThreadKey(e.target.value);
+            }}
             className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-bold text-slate-800 dark:text-slate-200 outline-none"
           >
             <option value="todos">Todos os Chamados / Conversas</option>
-            {requestsWithMessages.map(reqId => {
-              const req = requests.find(r => r.id === reqId);
-              return (
-                <option key={reqId} value={reqId}>
-                  Chamado {req?.requestNumber ? `#${req.requestNumber}` : reqId} ({req?.partName || 'Peça'})
-                </option>
-              );
-            })}
+            {threadsWithMessages.map(t => (
+              <option key={t.key} value={t.key}>
+                {t.label} ({t.messageCount} msgs)
+              </option>
+            ))}
           </select>
         </div>
       </div>
@@ -162,6 +327,7 @@ export const ChatSupervisionTab: React.FC<ChatSupervisionTabProps> = ({ adminUse
           ) : (
             filteredMessages.map(msg => {
               const sender = users.find(u => u.id === msg.senderId);
+              const threadKey = getMessageThreadKey(msg);
               return (
                 <div
                   key={msg.id}
@@ -193,8 +359,13 @@ export const ChatSupervisionTab: React.FC<ChatSupervisionTabProps> = ({ adminUse
                       <div>
                         <div className="flex items-center gap-1.5 flex-wrap">
                           <strong className="text-xs font-black text-slate-900 dark:text-white">
-                            {msg.senderName}
+                            {sender?.companyName || sender?.name || msg.senderName}
                           </strong>
+                          {sender?.phone && (
+                            <span className="text-[10px] font-mono text-slate-500">
+                              ({sender.phone})
+                            </span>
+                          )}
                           {msg.isSac && (
                             <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-red-600 text-white">
                               CHAMADO SAC
@@ -218,10 +389,19 @@ export const ChatSupervisionTab: React.FC<ChatSupervisionTabProps> = ({ adminUse
                       </div>
                     </div>
 
-                    <span className="text-[10px] text-slate-400 flex items-center gap-1">
-                      <Clock className="w-3 h-3" />
-                      {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleFocusIntervention(threadKey)}
+                        className="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-[10px] font-black cursor-pointer transition"
+                      >
+                        Intervir nesta conversa
+                      </button>
+                      <span className="text-[10px] text-slate-400 flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        {new Date(msg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
                   </div>
 
                   <p className="text-xs text-slate-800 dark:text-slate-200 leading-relaxed font-medium pl-10">
@@ -263,7 +443,7 @@ export const ChatSupervisionTab: React.FC<ChatSupervisionTabProps> = ({ adminUse
                   Realizar Intercessão Oficial
                 </h3>
                 <p className="text-[11px] text-slate-500">
-                  Sua mensagem será destacada com o selo oficial de moderação da plataforma.
+                  Envie orientação instantânea para cliente e fornecedor na conversa selecionada.
                 </p>
               </div>
             </div>
@@ -271,23 +451,29 @@ export const ChatSupervisionTab: React.FC<ChatSupervisionTabProps> = ({ adminUse
             {sentSuccess && (
               <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 shrink-0" />
-                <span>Intercessão registrada e enviada na thread com sucesso!</span>
+                <span>Intercessão enviada e salva em tempo real!</span>
               </div>
             )}
 
             <form onSubmit={handleSendIntercession} className="space-y-3">
               <div>
                 <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  Chamado para Intervenção
+                  Conversa / Chamado Alvo
                 </label>
                 <select
-                  value={selectedThreadRequestId}
-                  onChange={e => setSelectedThreadRequestId(e.target.value)}
+                  value={effectiveTargetKey}
+                  onChange={e => {
+                    setTargetThreadKey(e.target.value);
+                    setSelectedThreadKey(e.target.value || 'todos');
+                  }}
                   className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-bold text-slate-900 dark:text-white outline-none"
                 >
-                  {requests.map(req => (
-                    <option key={req.id} value={req.id}>
-                      #{req.requestNumber} - {req.partName} ({req.vehicleBrand} {req.vehicleModel})
+                  {allTargetThreads.length === 0 && (
+                    <option value="">Canal Geral / SAC</option>
+                  )}
+                  {allTargetThreads.map(t => (
+                    <option key={t.key} value={t.key}>
+                      {t.label}
                     </option>
                   ))}
                 </select>
@@ -295,31 +481,62 @@ export const ChatSupervisionTab: React.FC<ChatSupervisionTabProps> = ({ adminUse
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  Mensagem de Intercessão Administrativa
+                  Mensagem de Intervenção Administrativa
                 </label>
                 <textarea
+                  ref={intercessionInputRef}
                   rows={4}
-                  placeholder="Ex: Suporte AUTO SHOP: Identificamos uma dúvida técnica na compatibilidade da peça e contatamos o distribuidor..."
+                  placeholder="Ex: Suporte AUTO SHOP: Orientamos as partes sobre prazo, compatibilidade ou envio..."
                   value={intercessionText}
                   onChange={e => setIntercessionText(e.target.value)}
                   className="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-600 outline-none"
-                  required
                 />
               </div>
 
-              <button
-                type="submit"
-                className="w-full py-3 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-black text-xs shadow-md transition active:scale-98 flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <Send className="w-3.5 h-3.5" />
-                <span>ENVIAR INTERCESSÃO NO CHAT</span>
-              </button>
+              {intercessionMediaUrl && (
+                <div className="flex items-center justify-between p-2 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                  <div className="flex items-center gap-2">
+                    <img src={intercessionMediaUrl} alt="Anexo admin" className="w-10 h-10 rounded-lg object-cover" />
+                    <span className="text-[11px] font-bold text-slate-700 dark:text-slate-300">Imagem pronta</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIntercessionMediaUrl('')}
+                    className="p-1 text-red-600 hover:bg-red-50 rounded-lg cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2">
+                <label className="px-3 py-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 cursor-pointer hover:bg-slate-100">
+                  {uploadingPhoto ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
+                  <span>Foto</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    disabled={uploadingPhoto || sending}
+                    onChange={handlePhotoSelect}
+                  />
+                </label>
+
+                <button
+                  type="submit"
+                  disabled={(!intercessionText.trim() && !intercessionMediaUrl) || sending || uploadingPhoto}
+                  className="flex-1 py-3 rounded-xl bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white font-black text-xs shadow-md transition active:scale-98 flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {sending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                  <span>ENVIAR INTERVENÇÃO</span>
+                </button>
+              </div>
             </form>
 
             <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-[11px] text-slate-500 space-y-1">
               <strong className="block text-slate-700 dark:text-slate-300">Regras de Mediação:</strong>
-              <p>• O Admin pode mediar disputas, prazos e códigos OEM.</p>
-              <p>• Todas as mensagens são arquivadas para fins legais e conformidade LGPD.</p>
+              <p>• O Admin acompanha e intervém em qualquer conversa instantaneamente.</p>
+              <p>• Todas as mensagens são salvas no banco de dados e auditadas.</p>
             </div>
           </div>
         </div>

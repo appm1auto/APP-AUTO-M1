@@ -8,6 +8,7 @@ import {
   Vehicle,
   CatalogPart,
   PartRequest,
+  PartRequestExtraPart,
   Quote,
   OrderAndPayment,
   AuditLog,
@@ -305,7 +306,8 @@ class DatabaseService {
     prevReqIds: Set<string>,
     prevQuoteIds: Set<string>,
     prevConfirmedOrderIds: Set<string>,
-    prevSupplierConfirmedReceiptOrderIds: Set<string>
+    prevSupplierConfirmedReceiptOrderIds: Set<string>,
+    prevChatIds: Set<string>
   ) {
     if (typeof window === 'undefined') return;
     const now = Date.now();
@@ -339,6 +341,15 @@ class DatabaseService {
         window.dispatchEvent(new CustomEvent('compe:supplier_confirmed_payment', { detail: order }));
       }
     });
+    (this.data.chat_messages || []).forEach(msg => {
+      if (
+        msg?.id &&
+        !prevChatIds.has(msg.id) &&
+        now - new Date(msg.createdAt).getTime() < 15 * 60 * 1000
+      ) {
+        window.dispatchEvent(new CustomEvent('compe:chat_message', { detail: msg }));
+      }
+    });
   }
 
   applyServerSnapshot(serverData: unknown, revision?: number): void {
@@ -355,6 +366,7 @@ class DatabaseService {
         .filter(o => o.paymentStatus === 'confirmado' && o.supplierReceiptConfirmed === true)
         .map(o => o.id)
     );
+    const prevChatIds = new Set((this.data.chat_messages || []).map(m => m.id));
     this.data = this.mergeParsedSchema(serverData);
     if (typeof revision === 'number' && revision > this.serverRevision) {
       this.serverRevision = revision;
@@ -365,7 +377,8 @@ class DatabaseService {
       prevReqIds,
       prevQuoteIds,
       prevConfirmedOrderIds,
-      prevSupplierConfirmedReceiptOrderIds
+      prevSupplierConfirmedReceiptOrderIds,
+      prevChatIds
     );
   }
 
@@ -444,6 +457,14 @@ class DatabaseService {
 
     this.syncInFlight = run();
     return this.syncInFlight;
+  }
+
+  private cancelPendingPush() {
+    if (this.pushTimer) {
+      clearTimeout(this.pushTimer);
+      this.pushTimer = null;
+    }
+    this.pushPending = false;
   }
 
   private schedulePushToServer() {
@@ -1329,6 +1350,221 @@ class DatabaseService {
     return true;
   }
 
+  // Versões atômicas aguardáveis para criação, edição, exclusão e importação de usuários
+  async createUserRemote(
+    userData: Omit<User, 'id' | 'createdAt' | 'lastLogin'>,
+    adminId?: string
+  ): Promise<{ ok: boolean; user?: User; message?: string }> {
+    const cleanPhone = normalizeBrPhoneDigits(userData.phone) || userData.phone.replace(/\D/g, '');
+    const cleanDoc = (userData.document || '').replace(/\D/g, '');
+    const dupPhone = this.data.users.find(u => brPhonesMatch(u.phone, cleanPhone));
+    if (dupPhone) {
+      return { ok: false, message: 'Já existe uma conta cadastrada com este celular.' };
+    }
+    if (cleanDoc.length >= 11) {
+      const dupDoc = this.data.users.find(u => (u.document || '').replace(/\D/g, '') === cleanDoc);
+      if (dupDoc) {
+        return { ok: false, message: 'Já existe uma conta cadastrada com este CPF/CNPJ.' };
+      }
+    }
+
+    const tempUser = this.createUser(userData, true);
+    if (adminId) {
+      this.logAudit(adminId, 'Cadastro Central de Usuário', 'user', tempUser.id, `Admin cadastrou ${tempUser.name} (${tempUser.role}).`);
+    }
+
+    if (typeof window === 'undefined') {
+      return { ok: true, user: tempUser };
+    }
+
+    try {
+      this.cancelPendingPush();
+      const res = await fetch(apiUrl('/api/users'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify(tempUser),
+      });
+      const json = await this.parseJsonSafe<{
+        ok?: boolean;
+        message?: string;
+        user?: User;
+        revision?: number;
+        data?: DatabaseSchema;
+      }>(res);
+
+      if (res.status === 409 || (res.status >= 400 && res.status < 500 && res.status !== 404)) {
+        // Reverte item otimista se servidor rejeitou duplicidade ou dados inválidos
+        this.data.users = this.data.users.filter(u => u.id !== tempUser.id);
+        this.saveLocalOnly();
+        return { ok: false, message: json?.message || 'Não foi possível criar o usuário no servidor.' };
+      }
+
+      if (res.ok && json?.ok) {
+        if (json.data) {
+          this.applyServerSnapshot(json.data, json.revision);
+        }
+        return { ok: true, user: json.user || this.getUserById(tempUser.id) || tempUser };
+      }
+    } catch {
+      // Fallback para PUT /api/db
+    }
+
+    await this.pushToServerNow();
+    return { ok: true, user: this.getUserById(tempUser.id) || tempUser };
+  }
+
+  async updateUserRemote(
+    userId: string,
+    data: Partial<User>,
+    adminId?: string
+  ): Promise<{ ok: boolean; user?: User; message?: string }> {
+    const existing = this.getUserById(userId);
+    if (!existing) {
+      return { ok: false, message: 'Usuário não encontrado.' };
+    }
+
+    if (typeof window !== 'undefined') {
+      try {
+        this.cancelPendingPush();
+        const res = await fetch(apiUrl(`/api/users/${encodeURIComponent(userId)}`), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify(data),
+        });
+        const json = await this.parseJsonSafe<{
+          ok?: boolean;
+          message?: string;
+          user?: User;
+          revision?: number;
+          data?: DatabaseSchema;
+        }>(res);
+
+        if (res.status >= 400 && res.status < 500 && res.status !== 404) {
+          return { ok: false, message: json?.message || 'Erro ao atualizar usuário.' };
+        }
+
+        if (res.ok && json?.ok) {
+          if (json.data) {
+            this.applyServerSnapshot(json.data, json.revision);
+          } else {
+            const updatedLocal = this.updateUser(userId, data, adminId);
+            if (typeof json.revision === 'number' && json.revision > this.serverRevision) {
+              this.serverRevision = json.revision;
+            }
+            return { ok: true, user: json.user || updatedLocal };
+          }
+          if (adminId) {
+            this.logAudit(adminId, 'Edição de Dados de Usuário', 'user', userId, `Dados de ${json.user?.name || existing.name} atualizados.`);
+          }
+          return { ok: true, user: json.user || this.getUserById(userId) };
+        }
+      } catch {
+        // fallback abaixo
+      }
+    }
+
+    const updated = this.updateUser(userId, data, adminId);
+    await this.pushToServerNow();
+    return { ok: true, user: updated };
+  }
+
+  async deleteUserRemote(userId: string, adminId?: string): Promise<{ ok: boolean; message?: string }> {
+    const removed = this.deleteUser(userId, adminId);
+    if (!removed) {
+      return { ok: false, message: 'Usuário não encontrado.' };
+    }
+    if (typeof window !== 'undefined') {
+      try {
+        this.cancelPendingPush();
+        const res = await fetch(apiUrl(`/api/users/${encodeURIComponent(userId)}`), {
+          method: 'DELETE',
+          cache: 'no-store',
+        });
+        const json = await this.parseJsonSafe<{ ok?: boolean; revision?: number }>(res);
+        if (res.ok && typeof json?.revision === 'number' && json.revision > this.serverRevision) {
+          this.serverRevision = json.revision;
+        }
+        return { ok: true };
+      } catch {
+        // fallback
+      }
+    }
+    await this.pushToServerNow();
+    return { ok: true };
+  }
+
+  async importUsersRemote(
+    rows: Array<Record<string, unknown>>,
+    mode: 'skip_duplicates' | 'update_existing',
+    actorId?: string
+  ): Promise<{
+    ok: boolean;
+    message?: string;
+    createdCount: number;
+    updatedCount: number;
+    skippedDuplicates: number;
+    errors: Array<{ row: number; name?: string; phone?: string; reason: string }>;
+    duplicateDetails: Array<{ row: number; name?: string; phone?: string; reason: string }>;
+  }> {
+    try {
+      this.cancelPendingPush();
+      const res = await fetch(apiUrl('/api/users/import'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ rows, mode, actorId }),
+      });
+      const json = await this.parseJsonSafe<{
+        ok?: boolean;
+        message?: string;
+        createdCount?: number;
+        updatedCount?: number;
+        skippedDuplicates?: number;
+        errors?: Array<{ row: number; name?: string; phone?: string; reason: string }>;
+        duplicateDetails?: Array<{ row: number; name?: string; phone?: string; reason: string }>;
+        revision?: number;
+        data?: DatabaseSchema;
+      }>(res);
+
+      if (!res.ok || !json?.ok) {
+        return {
+          ok: false,
+          message: json?.message || 'Falha ao importar planilha de usuários.',
+          createdCount: 0,
+          updatedCount: 0,
+          skippedDuplicates: 0,
+          errors: json?.errors || [],
+          duplicateDetails: json?.duplicateDetails || [],
+        };
+      }
+
+      if (json.data) {
+        this.applyServerSnapshot(json.data, json.revision);
+      }
+
+      return {
+        ok: true,
+        createdCount: json.createdCount || 0,
+        updatedCount: json.updatedCount || 0,
+        skippedDuplicates: json.skippedDuplicates || 0,
+        errors: json.errors || [],
+        duplicateDetails: json.duplicateDetails || [],
+      };
+    } catch {
+      return {
+        ok: false,
+        message: 'Erro de conexão com o servidor durante a importação da planilha.',
+        createdCount: 0,
+        updatedCount: 0,
+        skippedDuplicates: 0,
+        errors: [],
+        duplicateDetails: [],
+      };
+    }
+  }
+
   updateUserStatus(userId: string, status: User['status'], adminId: string) {
     const user = this.getUserById(userId);
     if (!user) return;
@@ -1351,6 +1587,39 @@ class DatabaseService {
     return [...list].sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
   }
 
+  private async syncChatMessageToServer(newMsg: ChatMessage): Promise<{ ok: boolean; chatMessage?: ChatMessage; message?: string }> {
+    if (typeof window === 'undefined') return { ok: true, chatMessage: newMsg };
+    try {
+      this.cancelPendingPush();
+      const res = await fetch(apiUrl('/api/chat/messages'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify(newMsg),
+      });
+      const json = await this.parseJsonSafe<{
+        ok?: boolean;
+        message?: string;
+        chatMessage?: ChatMessage;
+        revision?: number;
+        data?: DatabaseSchema;
+      }>(res);
+      if (res.ok && json?.ok) {
+        if (json.data) {
+          this.applyServerSnapshot(json.data, json.revision);
+        }
+        return { ok: true, chatMessage: json.chatMessage || newMsg };
+      }
+      if (res.status >= 400 && res.status < 500 && res.status !== 404) {
+        return { ok: false, message: json?.message || 'Erro ao enviar mensagem.' };
+      }
+    } catch {
+      // fallback abaixo
+    }
+    this.schedulePushToServer();
+    return { ok: true, chatMessage: newMsg };
+  }
+
   sendChatMessage(msg: Omit<ChatMessage, 'id' | 'createdAt'>): ChatMessage {
     if (!this.data.chat_messages) {
       this.data.chat_messages = [...INITIAL_CHAT_MESSAGES];
@@ -1365,22 +1634,34 @@ class DatabaseService {
     this.logAudit(
       newMsg.senderId,
       newMsg.isSac ? 'Abertura / Mensagem de SAC' : newMsg.isAdminIntervention ? 'Intercessão Administrativa em Mensagem' : 'Envio de Mensagem no Chat',
-      'request',
-      newMsg.requestId || newMsg.orderId || 'geral',
+      'chat',
+      newMsg.orderId || newMsg.requestId || 'geral',
       `${newMsg.isSac ? '[SAC] ' : ''}Mensagem enviada por ${newMsg.senderName} (${newMsg.senderRole}): ${newMsg.message.slice(0, 60)}`
     );
-    this.save();
+    this.saveLocalOnly();
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('compe:chat_message', { detail: newMsg }));
     }
+    void this.syncChatMessageToServer(newMsg);
     return newMsg;
   }
 
-  markThreadAsRead(userId: string, filter: { requestId?: string; orderId?: string }) {
+  async sendChatMessageRemote(msg: Omit<ChatMessage, 'id' | 'createdAt'>): Promise<{ ok: boolean; chatMessage: ChatMessage; message?: string }> {
+    const newMsg = this.sendChatMessage(msg);
+    const res = await this.syncChatMessageToServer(newMsg);
+    return {
+      ok: res.ok,
+      chatMessage: res.chatMessage || newMsg,
+      message: res.message,
+    };
+  }
+
+  markThreadAsRead(userId: string, filter: { requestId?: string; orderId?: string; isSac?: boolean }) {
     if (!this.data.chat_messages || !userId) return;
     let changed = false;
     this.data.chat_messages.forEach(m => {
       const matches =
+        (filter.isSac && m.isSac) ||
         (filter.orderId && m.orderId === filter.orderId) ||
         (filter.requestId && m.requestId === filter.requestId);
       if (matches) {
@@ -1392,7 +1673,23 @@ class DatabaseService {
       }
     });
     if (changed) {
-      this.save();
+      this.saveLocalOnly();
+      if (typeof window !== 'undefined') {
+        void fetch(apiUrl('/api/chat/read'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId, ...filter }),
+        })
+          .then(res => res.json())
+          .then((json: { ok?: boolean; revision?: number }) => {
+            if (json?.ok && typeof json.revision === 'number' && json.revision > this.serverRevision) {
+              this.serverRevision = json.revision;
+            }
+          })
+          .catch(() => {
+            this.schedulePushToServer();
+          });
+      }
     }
   }
 
@@ -2375,22 +2672,46 @@ class DatabaseService {
       authorName: string;
     }> = [];
 
-    // Photos from requests
+    // Photos from requests (Principal até 5 + Peças Adicionais até 3 cada)
     this.data.requests.forEach(req => {
-      if (req.mediaUrl) {
+      const mainList =
+        req.mediaUrls && req.mediaUrls.length > 0
+          ? req.mediaUrls
+          : req.mediaUrl
+          ? [req.mediaUrl]
+          : [];
+      mainList.forEach((url, idx) => {
+        if (!url) return;
         items.push({
-          id: `media_req_${req.id}`,
+          id: idx === 0 ? `media_req_${req.id}` : `media_req_${req.id}_main_${idx}`,
           sourceType: 'request',
-          sourceId: req.id,
+          sourceId: idx === 0 ? req.id : `${req.id}::main::${idx}`,
           type: 'solicitacao',
-          mediaUrl: req.mediaUrl,
-          title: req.partName,
+          mediaUrl: url,
+          title: idx === 0 ? req.partName : `${req.partName} (Foto ${idx + 1})`,
           subtitle: `${req.vehicleBrand} ${req.vehicleModel} (${req.vehicleYear})`,
           date: req.createdAt,
           referenceNumber: req.requestNumber,
           authorName: req.customerName,
         });
-      }
+      });
+      (req.extraParts || []).forEach(ep => {
+        (ep.mediaUrls || []).forEach((url, idx) => {
+          if (!url) return;
+          items.push({
+            id: `media_req_${req.id}_extra_${ep.id}_${idx}`,
+            sourceType: 'request',
+            sourceId: `${req.id}::extra::${ep.id}::${idx}`,
+            type: 'solicitacao',
+            mediaUrl: url,
+            title: `${ep.partName} (Peça adicional · Foto ${idx + 1})`,
+            subtitle: `${req.vehicleBrand} ${req.vehicleModel} (${req.vehicleYear})`,
+            date: req.createdAt,
+            referenceNumber: req.requestNumber,
+            authorName: req.customerName,
+          });
+        });
+      });
     });
 
     // Photos from quotes
@@ -2440,11 +2761,44 @@ class DatabaseService {
     adminId: string
   ) {
     if (sourceType === 'request') {
-      const req = this.data.requests.find(r => r.id === sourceId);
-      if (!req) return;
-      if (updates.title !== undefined) req.partName = updates.title;
-      if (updates.mediaUrl !== undefined) req.mediaUrl = updates.mediaUrl;
-      this.logAudit(adminId, 'Edição de Mídia de Solicitação', 'request', sourceId, `Imagem/título atualizado em ${req.requestNumber}.`);
+      if (sourceId.includes('::extra::')) {
+        const [reqId, , extraId, idxStr] = sourceId.split('::');
+        const idx = Number(idxStr) || 0;
+        const req = this.data.requests.find(r => r.id === reqId);
+        const ep = req?.extraParts?.find(e => e.id === extraId);
+        if (!req || !ep) return;
+        if (updates.title !== undefined) ep.partName = updates.title;
+        if (updates.mediaUrl !== undefined) {
+          ep.mediaUrls = ep.mediaUrls ? [...ep.mediaUrls] : [];
+          ep.mediaUrls[idx] = updates.mediaUrl;
+        }
+        this.logAudit(adminId, 'Edição de Mídia de Solicitação', 'request', reqId, `Imagem/título atualizado em ${req.requestNumber}.`);
+      } else if (sourceId.includes('::main::')) {
+        const [reqId, , idxStr] = sourceId.split('::');
+        const idx = Number(idxStr) || 0;
+        const req = this.data.requests.find(r => r.id === reqId);
+        if (!req) return;
+        if (updates.title !== undefined) req.partName = updates.title;
+        if (updates.mediaUrl !== undefined) {
+          req.mediaUrls = req.mediaUrls ? [...req.mediaUrls] : req.mediaUrl ? [req.mediaUrl] : [];
+          req.mediaUrls[idx] = updates.mediaUrl;
+          if (idx === 0) req.mediaUrl = updates.mediaUrl;
+        }
+        this.logAudit(adminId, 'Edição de Mídia de Solicitação', 'request', reqId, `Imagem #${idx + 1}/título atualizado em ${req.requestNumber}.`);
+      } else {
+        const req = this.data.requests.find(r => r.id === sourceId);
+        if (!req) return;
+        if (updates.title !== undefined) req.partName = updates.title;
+        if (updates.mediaUrl !== undefined) {
+          req.mediaUrl = updates.mediaUrl;
+          if (req.mediaUrls && req.mediaUrls.length > 0) {
+            req.mediaUrls[0] = updates.mediaUrl;
+          } else {
+            req.mediaUrls = [updates.mediaUrl];
+          }
+        }
+        this.logAudit(adminId, 'Edição de Mídia de Solicitação', 'request', sourceId, `Imagem/título atualizado em ${req.requestNumber}.`);
+      }
     } else if (sourceType === 'quote') {
       const quo = this.data.quotes.find(q => q.id === sourceId);
       if (!quo) return;
@@ -2467,10 +2821,35 @@ class DatabaseService {
     adminId: string
   ) {
     if (sourceType === 'request') {
-      const req = this.data.requests.find(r => r.id === sourceId);
-      if (!req) return;
-      req.mediaUrl = undefined;
-      this.logAudit(adminId, 'Exclusão de Foto de Solicitação', 'request', sourceId, `Foto removida da solicitação ${req.requestNumber}.`);
+      if (sourceId.includes('::extra::')) {
+        const [reqId, , extraId, idxStr] = sourceId.split('::');
+        const idx = Number(idxStr) || 0;
+        const req = this.data.requests.find(r => r.id === reqId);
+        const ep = req?.extraParts?.find(e => e.id === extraId);
+        if (!req || !ep || !ep.mediaUrls) return;
+        ep.mediaUrls.splice(idx, 1);
+        this.logAudit(adminId, 'Exclusão de Foto de Solicitação', 'request', reqId, `Foto de peça adicional removida da solicitação ${req.requestNumber}.`);
+      } else if (sourceId.includes('::main::')) {
+        const [reqId, , idxStr] = sourceId.split('::');
+        const idx = Number(idxStr) || 0;
+        const req = this.data.requests.find(r => r.id === reqId);
+        if (!req) return;
+        if (req.mediaUrls && req.mediaUrls.length > idx) {
+          req.mediaUrls.splice(idx, 1);
+          req.mediaUrl = req.mediaUrls[0] || undefined;
+        }
+        this.logAudit(adminId, 'Exclusão de Foto de Solicitação', 'request', reqId, `Foto #${idx + 1} removida da solicitação ${req.requestNumber}.`);
+      } else {
+        const req = this.data.requests.find(r => r.id === sourceId);
+        if (!req) return;
+        if (req.mediaUrls && req.mediaUrls.length > 0) {
+          req.mediaUrls.shift();
+          req.mediaUrl = req.mediaUrls[0] || undefined;
+        } else {
+          req.mediaUrl = undefined;
+        }
+        this.logAudit(adminId, 'Exclusão de Foto de Solicitação', 'request', sourceId, `Foto removida da solicitação ${req.requestNumber}.`);
+      }
     } else if (sourceType === 'quote') {
       const quo = this.data.quotes.find(q => q.id === sourceId);
       if (!quo) return;
@@ -2518,7 +2897,9 @@ class DatabaseService {
       oemCode?: string;
       description?: string;
       mediaUrl?: string;
+      mediaUrls?: string[];
       mediaType?: 'photo' | 'video';
+      extraParts?: PartRequestExtraPart[];
       deliveryAddress: PartRequest['deliveryAddress'];
       clientGpsVerified?: boolean;
     }
@@ -2553,6 +2934,18 @@ class DatabaseService {
       coordinatesPrecision: resolvedPrecision,
     };
 
+    const normalizedMediaUrls = Array.isArray(data.mediaUrls)
+      ? data.mediaUrls.filter(Boolean).slice(0, 5)
+      : data.mediaUrl
+      ? [data.mediaUrl]
+      : [];
+    const normalizedExtraParts = Array.isArray(data.extraParts)
+      ? data.extraParts.map(ep => ({
+          ...ep,
+          mediaUrls: Array.isArray(ep.mediaUrls) ? ep.mediaUrls.filter(Boolean).slice(0, 3) : [],
+        }))
+      : undefined;
+
     const nowIso = new Date().toISOString();
     const expiresIso = new Date(Date.now() + initialWindowMinutes * 60 * 1000).toISOString();
     const attemptExpiresIso = expiresIso;
@@ -2564,6 +2957,9 @@ class DatabaseService {
       customerName: customer ? customer.name : 'Cliente Anônimo',
       customerPhone: customer ? customer.phone : '',
       ...data,
+      mediaUrl: normalizedMediaUrls[0] || data.mediaUrl,
+      mediaUrls: normalizedMediaUrls,
+      extraParts: normalizedExtraParts,
       deliveryAddress: resolvedDeliveryAddress,
       status: 'aguardando_orcamentos',
       createdAt: nowIso,
@@ -2629,7 +3025,9 @@ class DatabaseService {
       oemCode?: string;
       description?: string;
       mediaUrl?: string;
+      mediaUrls?: string[];
       mediaType?: 'photo' | 'video';
+      extraParts?: PartRequestExtraPart[];
       deliveryAddress: PartRequest['deliveryAddress'];
       clientGpsVerified?: boolean;
     }
@@ -2659,7 +3057,9 @@ class DatabaseService {
       oemCode?: string;
       description?: string;
       mediaUrl?: string;
+      mediaUrls?: string[];
       mediaType?: 'photo' | 'video';
+      extraParts?: PartRequestExtraPart[];
       deliveryAddress: PartRequest['deliveryAddress'];
       clientGpsVerified?: boolean;
     }
@@ -3755,26 +4155,142 @@ class DatabaseService {
       'client_ads_settings',
       `Modo rodapé: ${updated.footerMode} (${updated.intervalSeconds}s) · Abertura ${updated.showOnStartupSplash ? `${updated.startupSplashSeconds}s` : 'desativada'} · ${updated.items.length} anúncio(s).`
     );
-    this.save();
+    this.saveLocalOnly();
 
     if (typeof window !== 'undefined') {
+      this.cancelPendingPush();
       void fetch(apiUrl('/api/admin/client-ads'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updated),
       })
         .then(res => res.json())
-        .then((json: { ok?: boolean; revision?: number }) => {
-          if (json?.ok && typeof json.revision === 'number') {
+        .then((json: { ok?: boolean; revision?: number; data?: DatabaseSchema; client_ads_settings?: ClientAdsSettings }) => {
+          if (json?.ok && json.data) {
+            this.applyServerSnapshot(json.data, json.revision);
+          } else if (json?.ok && typeof json.revision === 'number') {
             this.serverRevision = Math.max(this.serverRevision, json.revision);
           }
         })
         .catch(() => {
-          // Fallback already handled via this.save()
+          this.schedulePushToServer();
         });
     }
 
     return updated;
+  }
+
+  async updateClientAdsSettingsRemote(
+    settings: Partial<ClientAdsSettings>,
+    adminId: string
+  ): Promise<{ ok: boolean; settings: ClientAdsSettings; message?: string }> {
+    const current = this.getClientAdsSettings();
+    const updated: ClientAdsSettings = {
+      ...current,
+      ...settings,
+      items: Array.isArray(settings.items) ? settings.items : current.items,
+      updatedAt: new Date().toISOString(),
+    };
+    this.data.client_ads_settings = updated;
+    this.logAudit(
+      adminId,
+      'Atualização de Anúncios para Clientes',
+      'spam_config',
+      'client_ads_settings',
+      `Exibição: ${updated.enabled ? 'ATIVA' : 'DESATIVADA'} · Rodapé: ${updated.footerMode} (${updated.intervalSeconds}s) · ${updated.items.length} anúncio(s).`
+    );
+    this.saveLocalOnly();
+
+    if (typeof window !== 'undefined') {
+      try {
+        this.cancelPendingPush();
+        const res = await fetch(apiUrl('/api/admin/client-ads'), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify(updated),
+        });
+        const json = await this.parseJsonSafe<{
+          ok?: boolean;
+          message?: string;
+          revision?: number;
+          client_ads_settings?: ClientAdsSettings;
+          data?: DatabaseSchema;
+        }>(res);
+        if (res.ok && json?.ok) {
+          if (json.data) {
+            this.applyServerSnapshot(json.data, json.revision);
+          } else if (typeof json.revision === 'number') {
+            this.serverRevision = Math.max(this.serverRevision, json.revision);
+          }
+          return { ok: true, settings: json.client_ads_settings || this.getClientAdsSettings() };
+        }
+        return { ok: false, settings: this.getClientAdsSettings(), message: json?.message || 'Erro ao salvar anúncios.' };
+      } catch {
+        await this.pushToServerNow();
+      }
+    }
+
+    return { ok: true, settings: this.getClientAdsSettings() };
+  }
+
+  // Compressão rápida e upload atômico para fotos de solicitações e chat
+  async compressAndUploadImageFile(
+    file: File,
+    maxDim = 1280,
+    quality = 0.82
+  ): Promise<{ ok: boolean; url?: string; message?: string }> {
+    let uploadTarget = file;
+    if (typeof window !== 'undefined' && file.type.startsWith('image/') && !file.type.includes('svg')) {
+      try {
+        const compressed = await new Promise<File | null>(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const img = new Image();
+            img.onload = () => {
+              let { width, height } = img;
+              if (width > maxDim || height > maxDim) {
+                const ratio = Math.min(maxDim / width, maxDim / height);
+                width = Math.max(1, Math.round(width * ratio));
+                height = Math.max(1, Math.round(height * ratio));
+              }
+              const canvas = document.createElement('canvas');
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              if (!ctx) {
+                resolve(null);
+                return;
+              }
+              ctx.drawImage(img, 0, 0, width, height);
+              canvas.toBlob(
+                blob => {
+                  if (!blob) {
+                    resolve(null);
+                    return;
+                  }
+                  const outName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+                  resolve(new File([blob], outName, { type: 'image/jpeg' }));
+                },
+                'image/jpeg',
+                quality
+              );
+            };
+            img.onerror = () => resolve(null);
+            img.src = String(reader.result || '');
+          };
+          reader.onerror = () => resolve(null);
+          reader.readAsDataURL(file);
+        });
+        if (compressed && compressed.size < file.size) {
+          uploadTarget = compressed;
+        }
+      } catch {
+        // Fallback para arquivo original
+      }
+    }
+    const res = await this.uploadSharedMediaFile(uploadTarget);
+    return { ok: res.ok, url: res.url, message: res.message };
   }
 
   // --- UPLOAD / REMOÇÃO DE MATERIAIS DO ADMIN (PDF, IMAGEM, VÍDEO) ---

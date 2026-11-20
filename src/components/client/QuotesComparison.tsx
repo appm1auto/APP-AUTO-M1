@@ -16,6 +16,11 @@ import {
 } from 'lucide-react';
 import { Quote, PartRequest, OrderAndPayment } from '../../types';
 import { db } from '../../services/db';
+import {
+  isOrderIdentityUnlocked,
+  getMaskedCounterpartyLabel,
+  formatCityNeighborhood,
+} from '../../services/rbac';
 
 interface QuotesComparisonProps {
   request: PartRequest;
@@ -155,7 +160,7 @@ export const QuotesComparison: React.FC<QuotesComparisonProps> = ({
       <div className="flex items-center gap-2 p-3 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs text-slate-600 dark:text-slate-400">
         <Lock className="w-4 h-4 text-blue-600 shrink-0" />
         <span>
-          <strong>Proteção AUTO SHOP:</strong> As propostas chegam em tempo real e estão ordenadas estritamente em ordem crescente (do menor para o maior valor no topo). Você tem 60 minutos para aprovar e garantir o melhor preço.
+          <strong>Proteção AUTO SHOP:</strong> As propostas estão ordenadas em ordem crescente (menor valor no topo). Nome da loja, foto/logo, WhatsApp e endereço completo do fornecedor ficam ocultos até o pagamento e a confirmação do recebimento em conta pelo fornecedor; antes disso você visualiza a distância exata (km), Cidade, Bairro e condições da peça.
         </span>
       </div>
 
@@ -240,7 +245,12 @@ export const QuotesComparison: React.FC<QuotesComparisonProps> = ({
           {sortedQuotes.map((quote, idx) => {
             const isBestOffer = idx === 0;
             const rankNumber = idx + 1;
-            const maskedSupplierCode = `Fornecedor Certificado #${quote.supplierId.slice(-4).toUpperCase()}`;
+            const maskedSupplierCode = getMaskedCounterpartyLabel('fornecedor', quote.supplierId);
+            const supplierUnlocked = Boolean(
+              existingOrder &&
+                existingOrder.quoteId === quote.id &&
+                isOrderIdentityUnlocked(existingOrder, 'cliente')
+            );
             const supplierUser = db.getUserById(quote.supplierId);
             const distDetails = db.getDistanceDetailsSupplierToRequest(supplierUser, request);
             const displayDistanceKm = distDetails?.distanceKm ?? quote.distanceKm ?? null;
@@ -320,7 +330,7 @@ export const QuotesComparison: React.FC<QuotesComparisonProps> = ({
                       </h4>
 
                       <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
-                        {quote.supplierTier === 'opcao_3' && quote.supplierLogoUrl ? (
+                        {supplierUnlocked && quote.supplierTier === 'opcao_3' && quote.supplierLogoUrl ? (
                           <div className="flex items-center gap-2 bg-purple-50 dark:bg-purple-950/70 px-3 py-1 rounded-xl border border-purple-200 dark:border-purple-800 shadow-xs">
                             <img
                               src={quote.supplierLogoUrl}
@@ -328,17 +338,24 @@ export const QuotesComparison: React.FC<QuotesComparisonProps> = ({
                               className="w-6 h-6 rounded-lg object-cover border border-purple-300 dark:border-purple-700"
                             />
                             <strong className="text-purple-900 dark:text-purple-200 font-bold">
-                              {quote.supplierName}
+                              {supplierUser?.companyName || quote.supplierName}
                             </strong>
                             <span className="text-[9px] uppercase font-black bg-purple-600 text-white px-2 py-0.5 rounded-full">
                               Fornecedor Nacional (3ª Opção)
                             </span>
                           </div>
                         ) : (
-                          <span className="flex items-center gap-1 text-slate-700 dark:text-slate-300 font-medium">
-                            <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
-                            {maskedSupplierCode}
-                          </span>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="flex items-center gap-1 text-slate-700 dark:text-slate-300 font-medium">
+                              <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
+                              {supplierUnlocked ? (supplierUser?.companyName || quote.supplierName) : maskedSupplierCode}
+                            </span>
+                            {quote.supplierTier === 'opcao_3' && (
+                              <span className="text-[9px] uppercase font-black bg-purple-600 text-white px-2 py-0.5 rounded-full">
+                                Nacional Certificado (3ª Opção)
+                              </span>
+                            )}
+                          </div>
                         )}
                         <span className="flex items-center gap-1 text-amber-500 font-bold">
                           <Star className="w-3.5 h-3.5 fill-current" />
@@ -373,7 +390,7 @@ export const QuotesComparison: React.FC<QuotesComparisonProps> = ({
                               {displayDistanceKm !== null ? `${displayDistanceKm.toFixed(1)} km reais` : 'Calculando km...'}
                             </span>
                             <span className="text-[10px] text-emerald-700/80 dark:text-emerald-400/80 block">
-                              {supplierUser?.address?.city ? `De ${supplierUser.address.city}/${supplierUser.address.state}` : 'Distância até seu CEP'}
+                              {supplierUser?.address ? `De ${formatCityNeighborhood(supplierUser.address)}` : 'Distância até seu CEP'}
                               {displayDistanceSource === 'rota_real'
                                 ? distDetails?.durationMin
                                   ? ` · Rota ~${distDetails.durationMin} min`

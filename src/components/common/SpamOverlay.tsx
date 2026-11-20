@@ -29,9 +29,14 @@ import {
   Truck,
   Bell
 } from 'lucide-react';
-import { SpamTriggerConfig, SupplierTier } from '../../types';
+import { SpamTriggerConfig, SupplierTier, PartRequestExtraPart, UserRole } from '../../types';
 import { soundEffects } from '../../services/sound';
 import { db } from '../../services/db';
+import {
+  isOrderIdentityUnlocked,
+  getMaskedCounterpartyLabel,
+  formatCityNeighborhood,
+} from '../../services/rbac';
 
 export interface ActiveSpamPayload {
   config: SpamTriggerConfig;
@@ -56,7 +61,10 @@ export interface ActiveSpamPayload {
   fullAddress?: string;
   deliveryCep?: string;
   distanceKm?: number;
+  viewerRole?: UserRole;
   mediaUrl?: string;
+  mediaUrls?: string[];
+  extraParts?: PartRequestExtraPart[];
   mediaType?: 'photo' | 'video';
   priceSummary?: string;
   partPriceSummary?: string;
@@ -803,70 +811,110 @@ export const SpamOverlay: React.FC<SpamOverlayProps> = ({ spam }) => {
                 </div>
               )}
 
-              {showCustomerData && (
-                <div className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 space-y-3">
-                  <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-200 dark:border-slate-700">
-                    <div className="flex items-center gap-2">
-                      <UserCheck className="w-4 h-4 text-blue-600" />
-                      <span className="text-xs font-black uppercase text-slate-700 dark:text-slate-200">
-                        Identificação do Comprador & Pagamento
+              {showCustomerData && (() => {
+                const linkedOrd = spam.orderId ? db.getOrderById(spam.orderId) : undefined;
+                const identityUnlocked = Boolean(
+                  spam.isPreviewMode || isOrderIdentityUnlocked(linkedOrd, spam.viewerRole || 'fornecedor')
+                );
+                const maskedCustomerLabel = getMaskedCounterpartyLabel(
+                  'cliente',
+                  linkedOrd?.customerId || spam.orderId
+                );
+                const regionText = formatCityNeighborhood({
+                  city: spam.city || linkedOrd?.deliveryAddress?.city,
+                  neighborhood: spam.neighborhood || linkedOrd?.deliveryAddress?.neighborhood,
+                });
+
+                return (
+                  <div className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 space-y-3">
+                    <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-200 dark:border-slate-700">
+                      <div className="flex items-center gap-2">
+                        {identityUnlocked ? (
+                          <UserCheck className="w-4 h-4 text-blue-600" />
+                        ) : (
+                          <Lock className="w-4 h-4 text-amber-600" />
+                        )}
+                        <span className="text-xs font-black uppercase text-slate-700 dark:text-slate-200">
+                          {identityUnlocked
+                            ? 'Identificação do Comprador & Pagamento'
+                            : 'Dados da Venda, Distância & Recebimento (Sigilo Ativo)'}
+                        </span>
+                      </div>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-200">
+                        Dados Bancários / PIX / Cartão
                       </span>
                     </div>
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-200">
-                      Dados Bancários / PIX / Cartão
-                    </span>
-                  </div>
 
-                  <div className="flex items-center gap-3">
-                    <div className="w-11 h-11 rounded-2xl overflow-hidden bg-slate-200 dark:bg-slate-700 flex items-center justify-center shrink-0">
-                      {spam.customerPhotoUrl ? (
-                        <img src={spam.customerPhotoUrl} alt={spam.customerName} className="w-full h-full object-cover" />
-                      ) : (
-                        <UserCheck className="w-6 h-6 text-blue-600" />
-                      )}
+                    <div className="flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-2xl overflow-hidden bg-slate-200 dark:bg-slate-700 flex items-center justify-center shrink-0">
+                        {identityUnlocked && spam.customerPhotoUrl ? (
+                          <img src={spam.customerPhotoUrl} alt={spam.customerName} className="w-full h-full object-cover" />
+                        ) : identityUnlocked ? (
+                          <UserCheck className="w-6 h-6 text-blue-600" />
+                        ) : (
+                          <Lock className="w-5 h-5 text-amber-600" />
+                        )}
+                      </div>
+                      <div className="text-xs space-y-0.5">
+                        <span className="text-[10px] uppercase font-bold text-slate-500 block">
+                          {identityUnlocked ? 'Nome do Cliente:' : 'Comprador Protegido:'}
+                        </span>
+                        <strong className="text-sm font-black text-slate-900 dark:text-white block">
+                          {identityUnlocked ? (spam.customerName || 'Cliente AUTO SHOP') : maskedCustomerLabel}
+                        </strong>
+                        {(spam.distanceKm !== undefined || regionText !== 'Região protegida') && (
+                          <span className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300 block">
+                            {spam.distanceKm !== undefined ? `${spam.distanceKm.toFixed(1)} km reais · ` : ''}
+                            {regionText}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <div className="text-xs space-y-0.5">
-                      <span className="text-[10px] uppercase font-bold text-slate-500 block">Nome do Cliente:</span>
-                      <strong className="text-sm font-black text-slate-900 dark:text-white block">
-                        {spam.customerName || 'Cliente AUTO SHOP'}
-                      </strong>
-                    </div>
-                  </div>
 
-                  <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs space-y-1.5">
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <span className="text-slate-500 font-semibold">Meio de Pagamento:</span>
-                      <strong className="font-black text-slate-900 dark:text-white">
-                        {spam.paymentMethodDetail || spam.paymentMethodText || 'PIX / Cartão'}
-                      </strong>
-                    </div>
-                    {spam.supplierAccountSummary && (
-                      <div className="flex items-start justify-between gap-2 flex-wrap">
-                        <span className="text-slate-500 font-semibold">Conta / Chave de Recebimento:</span>
-                        <strong className="font-mono text-emerald-700 dark:text-emerald-400 text-right">
-                          {spam.supplierAccountSummary}
+                    {!identityUnlocked && (
+                      <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 text-[11px] font-bold text-amber-900 dark:text-amber-200 flex items-center gap-2">
+                        <Lock className="w-4 h-4 text-amber-600 shrink-0" />
+                        <span>
+                          Nome completo, WhatsApp, CPF/CNPJ, CEP, rua e número do cliente serão liberados somente após você CONFIRMAR O PAGAMENTO em conta.
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs space-y-1.5">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <span className="text-slate-500 font-semibold">Meio de Pagamento:</span>
+                        <strong className="font-black text-slate-900 dark:text-white">
+                          {spam.paymentMethodDetail || spam.paymentMethodText || 'PIX / Cartão'}
                         </strong>
                       </div>
-                    )}
-                    {(spam.gatewayProviderText || spam.gatewayChargeId) && (
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <span className="text-slate-500 font-semibold">Gateway / Cobrança:</span>
-                        <span className="font-mono font-bold text-slate-700 dark:text-slate-200">
-                          {spam.gatewayProviderText || 'ASAAS'} {spam.gatewayChargeId ? `· ${spam.gatewayChargeId}` : ''}
-                        </span>
-                      </div>
-                    )}
-                    {spam.splitStatusText && (
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <span className="text-slate-500 font-semibold">Status do Repasse:</span>
-                        <span className="font-bold text-emerald-700 dark:text-emerald-400">
-                          {spam.splitStatusText}
-                        </span>
-                      </div>
-                    )}
+                      {spam.supplierAccountSummary && (
+                        <div className="flex items-start justify-between gap-2 flex-wrap">
+                          <span className="text-slate-500 font-semibold">Conta / Chave de Recebimento:</span>
+                          <strong className="font-mono text-emerald-700 dark:text-emerald-400 text-right">
+                            {spam.supplierAccountSummary}
+                          </strong>
+                        </div>
+                      )}
+                      {(spam.gatewayProviderText || spam.gatewayChargeId) && (
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-slate-500 font-semibold">Gateway / Cobrança:</span>
+                          <span className="font-mono font-bold text-slate-700 dark:text-slate-200">
+                            {spam.gatewayProviderText || 'ASAAS'} {spam.gatewayChargeId ? `· ${spam.gatewayChargeId}` : ''}
+                          </span>
+                        </div>
+                      )}
+                      {spam.splitStatusText && (
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-slate-500 font-semibold">Status do Repasse:</span>
+                          <span className="font-bold text-emerald-700 dark:text-emerald-400">
+                            {spam.splitStatusText}
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {spam.cancellationWarning && (
                 <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-800 text-[11px] font-bold text-red-700 dark:text-red-300">
@@ -1071,17 +1119,23 @@ export const SpamOverlay: React.FC<SpamOverlayProps> = ({ spam }) => {
               {renderPaymentMethodsBlock()}
 
               {showLocation && (spam.fullAddress || spam.city || spam.neighborhood || spam.distanceKm !== undefined) && (() => {
-                const canExposeAddress =
-                  config.type === 'venda_confirmada' ||
-                  config.type === 'pedido_a_caminho' ||
-                  config.targetAudience === 'cliente' ||
-                  config.targetAudience === 'admin';
+                const linkedOrd = spam.orderId ? db.getOrderById(spam.orderId) : undefined;
+                const identityUnlocked = Boolean(
+                  spam.isPreviewMode ||
+                    spam.viewerRole === 'admin' ||
+                    isOrderIdentityUnlocked(linkedOrd, spam.viewerRole || 'cliente')
+                );
+                const canExposeAddress = Boolean(
+                  spam.isPreviewMode ||
+                    spam.viewerRole === 'admin' ||
+                    (identityUnlocked && (config.type === 'venda_confirmada' || config.type === 'pedido_a_caminho'))
+                );
                 return (
                   <div className="p-3.5 rounded-2xl border border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-950/30 text-xs flex items-start gap-2">
                     <MapPin className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
                     <div>
                       <strong className="block text-blue-900 dark:text-blue-200">
-                        {canExposeAddress ? 'Localidade / Entrega:' : 'Distância / Sigilo AUTO SHOP:'}
+                        {canExposeAddress ? 'Localidade / Entrega:' : 'Distância & Região (Sigilo AUTO SHOP):'}
                       </strong>
                       {canExposeAddress ? (
                         <span>
@@ -1090,9 +1144,9 @@ export const SpamOverlay: React.FC<SpamOverlayProps> = ({ spam }) => {
                         </span>
                       ) : (
                         <span>
-                          {spam.distanceKm !== undefined
-                            ? `${spam.distanceKm.toFixed(1)} km reais de distância (CEP e rua ocultos até confirmação do pagamento)`
-                            : 'CEP, rua e dados do cliente ocultos até confirmação do pagamento'}
+                          {spam.distanceKm !== undefined ? `${spam.distanceKm.toFixed(1)} km reais · ` : ''}
+                          {formatCityNeighborhood({ city: spam.city, neighborhood: spam.neighborhood })}
+                          {' — '}Rua, número, CEP e dados pessoais ocultos até confirmação do pagamento em conta.
                         </span>
                       )}
                     </div>
@@ -1323,47 +1377,97 @@ export const SpamOverlay: React.FC<SpamOverlayProps> = ({ spam }) => {
               </div>
             )}
 
-            {showPhoto && (
-              <div className="w-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-4 space-y-3">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-700">
-                  <span className="text-xs font-black uppercase text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
-                    <Camera className="w-4 h-4 text-orange-500" />
-                    Card 2 · Foto da Peça Solicitada
-                  </span>
-                  {spam.mediaUrl && (
-                    <button
-                      type="button"
-                      onClick={() => setLightboxUrl(spam.mediaUrl || null)}
-                      className="text-[11px] font-bold text-orange-600 hover:underline flex items-center gap-1 cursor-pointer"
-                    >
-                      <Maximize2 className="w-3.5 h-3.5" /> Ampliar em Tela Cheia
-                    </button>
+            {showPhoto && (() => {
+              const reqObj = spam.requestId ? db.getRequestById(spam.requestId) : undefined;
+              const mainPhotos =
+                spam.mediaUrls && spam.mediaUrls.length > 0
+                  ? spam.mediaUrls
+                  : reqObj?.mediaUrls && reqObj.mediaUrls.length > 0
+                  ? reqObj.mediaUrls
+                  : spam.mediaUrl
+                  ? [spam.mediaUrl]
+                  : [];
+              const extras = (spam.extraParts || reqObj?.extraParts || []).filter(
+                ep => ep.mediaUrls && ep.mediaUrls.length > 0
+              );
+              const totalPhotos =
+                mainPhotos.length + extras.reduce((acc, ep) => acc + (ep.mediaUrls?.length || 0), 0);
+
+              return (
+                <div className="w-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-4 space-y-3">
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-700">
+                    <span className="text-xs font-black uppercase text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                      <Camera className="w-4 h-4 text-orange-500" />
+                      Card 2 · Fotos da Peça Solicitada ({totalPhotos})
+                    </span>
+                    {mainPhotos[0] && (
+                      <button
+                        type="button"
+                        onClick={() => setLightboxUrl(mainPhotos[0])}
+                        className="text-[11px] font-bold text-orange-600 hover:underline flex items-center gap-1 cursor-pointer"
+                      >
+                        <Maximize2 className="w-3.5 h-3.5" /> Ampliar Foto
+                      </button>
+                    )}
+                  </div>
+
+                  {totalPhotos > 0 ? (
+                    <div className="space-y-3">
+                      {mainPhotos.length > 0 && (
+                        <div className={`grid gap-2 ${mainPhotos.length === 1 ? 'grid-cols-1' : 'grid-cols-2 sm:grid-cols-3'}`}>
+                          {mainPhotos.map((url, idx) => (
+                            <div
+                              key={`main-photo-${idx}`}
+                              className={`relative ${mainPhotos.length === 1 ? 'h-48 sm:h-56' : 'h-28'} rounded-xl overflow-hidden bg-slate-950 cursor-pointer group border border-slate-300 dark:border-slate-700`}
+                              onClick={() => setLightboxUrl(url)}
+                            >
+                              <img
+                                src={url}
+                                alt={`Peça principal ${idx + 1}`}
+                                className="w-full h-full object-contain group-hover:scale-105 transition duration-300"
+                                referrerPolicy="no-referrer"
+                              />
+                              <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/75 text-white text-[9px] font-bold">
+                                Foto #{idx + 1}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {extras.map((ep, eIdx) => (
+                        <div key={ep.id || eIdx} className="space-y-1.5 pt-2 border-t border-slate-200 dark:border-slate-700">
+                          <span className="text-[11px] font-bold text-orange-600 dark:text-orange-400 block">
+                            Peça Adicional: {ep.partName} ({ep.mediaUrls?.length || 0} foto(s))
+                          </span>
+                          <div className="grid grid-cols-3 gap-2">
+                            {(ep.mediaUrls || []).map((url, pIdx) => (
+                              <div
+                                key={`${ep.id}-p-${pIdx}`}
+                                onClick={() => setLightboxUrl(url)}
+                                className="relative h-24 rounded-xl overflow-hidden bg-slate-950 cursor-pointer group border border-orange-300 dark:border-orange-800"
+                              >
+                                <img
+                                  src={url}
+                                  alt={`${ep.partName} ${pIdx + 1}`}
+                                  className="w-full h-full object-contain group-hover:scale-105 transition"
+                                  referrerPolicy="no-referrer"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="h-28 rounded-xl bg-slate-100 dark:bg-slate-800 border-2 border-dashed border-slate-300 dark:border-slate-700 flex flex-col items-center justify-center text-slate-400">
+                      <Camera className="w-8 h-8 mb-1 opacity-50" />
+                      <span className="text-xs font-medium">Cliente não anexou foto para este pedido</span>
+                    </div>
                   )}
                 </div>
-
-                {spam.mediaUrl ? (
-                  <div
-                    className="relative w-full h-48 sm:h-56 rounded-xl overflow-hidden bg-slate-950 cursor-pointer group"
-                    onClick={() => setLightboxUrl(spam.mediaUrl || null)}
-                  >
-                    <img
-                      src={spam.mediaUrl}
-                      alt="Foto da peça solicitada"
-                      className="w-full h-full object-contain group-hover:scale-105 transition duration-300"
-                      referrerPolicy="no-referrer"
-                    />
-                    <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition flex items-center justify-center text-white gap-2 text-xs font-bold">
-                      <Maximize2 className="w-5 h-5" /> Clique para Ampliar
-                    </div>
-                  </div>
-                ) : (
-                  <div className="h-28 rounded-xl bg-slate-100 dark:bg-slate-800 border-2 border-dashed border-slate-300 dark:border-slate-700 flex flex-col items-center justify-center text-slate-400">
-                    <Camera className="w-8 h-8 mb-1 opacity-50" />
-                    <span className="text-xs font-medium">Cliente não anexou foto para este pedido</span>
-                  </div>
-                )}
-              </div>
-            )}
+              );
+            })()}
 
             {showLocation && (
               <div className="w-full rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 p-4 space-y-2.5">
@@ -1419,7 +1523,7 @@ export const SpamOverlay: React.FC<SpamOverlayProps> = ({ spam }) => {
                   <div className="p-2.5 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-300 flex items-center gap-2">
                     <Lock className="w-4 h-4 text-orange-500 shrink-0" />
                     <span>
-                      <strong>Sigilo AUTO SHOP:</strong> Você visualiza apenas Distância Real (km), Cidade e Bairro. Rua, número, CEP e dados pessoais do cliente permanecem ocultos até o pagamento.
+                      <strong>Sigilo AUTO SHOP:</strong> Você visualiza apenas Distância Real (km), Cidade e Bairro. Rua, número, CEP, nome e WhatsApp do cliente permanecem ocultos até a confirmação do pagamento em conta.
                     </span>
                   </div>
                 </div>

@@ -212,6 +212,16 @@ export interface DeliveryAddress {
   coordinatesPrecision?: 'gps' | 'exact_cep' | 'cep_prefix';
 }
 
+export interface PartRequestExtraPart {
+  id: string;
+  partName: string;
+  partCategory: string;
+  oemCode?: string;
+  characteristics?: string;
+  position?: string;
+  mediaUrls?: string[]; // Até 3 fotos por peça adicional
+}
+
 export interface PartRequest {
   id: string;
   requestNumber: string; // e.g. CMP-84920
@@ -233,8 +243,10 @@ export interface PartRequest {
   partSubcategory?: string;
   oemCode?: string;
   description?: string;
-  mediaUrl?: string; // photo or video
+  mediaUrl?: string; // primary photo or video (alias for mediaUrls[0])
+  mediaUrls?: string[]; // Até 5 fotos na peça principal
   mediaType?: 'photo' | 'video';
+  extraParts?: PartRequestExtraPart[];
   deliveryAddress: DeliveryAddress;
   status: RequestStatus;
   createdAt: string;
@@ -346,7 +358,7 @@ export interface AuditLog {
   userPhone: string;
   userRole: UserRole;
   action: string;
-  entityType: 'request' | 'quote' | 'order' | 'user' | 'payment' | 'pin_validation' | 'spam_config';
+  entityType: 'request' | 'quote' | 'order' | 'user' | 'payment' | 'pin_validation' | 'spam_config' | 'chat';
   entityId: string;
   details: string;
   ipAddress: string;

@@ -20,7 +20,12 @@ import { SupplierReferenceFlow } from './SupplierReferenceFlow';
 import { ManufacturerCatalogHub } from '../catalogs/ManufacturerCatalogHub';
 import { soundEffects } from '../../services/sound';
 import { OrderChatModal } from '../common/OrderChatModal';
-import { isSupplierClassifiedAndApproved } from '../../services/rbac';
+import {
+  isSupplierClassifiedAndApproved,
+  isOrderIdentityUnlocked,
+  getMaskedCounterpartyLabel,
+  formatCityNeighborhood,
+} from '../../services/rbac';
 import { getCurrentDeviceCoordinates } from '../../services/geolocation';
 
 // ============================================================================
@@ -315,27 +320,80 @@ const OpportunitySpamModal: React.FC<OpportunitySpamModalProps> = ({
             </div>
           </div>
 
-          {/* CARD 2: FOTO (MEIO) - width-full */}
-          <div className="bg-white dark:bg-slate-900 rounded-2xl border-2 border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden w-full">
-            <div className="bg-gradient-to-r from-purple-500 to-purple-600 px-4 py-3 text-white">
-              <div className="flex items-center gap-2">
-                <Camera className="w-5 h-5" />
-                <h3 className="font-black text-sm uppercase tracking-wider">Foto da Peça Solicitada</h3>
+          {/* CARD 2: FOTOS DAS PEÇAS (MEIO) - width-full */}
+          {(() => {
+            const mainPhotos =
+              request.mediaUrls && request.mediaUrls.length > 0
+                ? request.mediaUrls
+                : request.mediaUrl
+                ? [request.mediaUrl]
+                : [];
+            const extraGroups = (request.extraParts || [])
+              .filter(ep => ep.mediaUrls && ep.mediaUrls.length > 0)
+              .map((ep, idx) => ({
+                label: ep.partName || `Peça Adicional ${idx + 2}`,
+                photos: ep.mediaUrls || [],
+              }));
+            const totalPhotosCount =
+              mainPhotos.length + extraGroups.reduce((acc, g) => acc + g.photos.length, 0);
+
+            return (
+              <div className="bg-white dark:bg-slate-900 rounded-2xl border-2 border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden w-full">
+                <div className="bg-gradient-to-r from-purple-500 to-purple-600 px-4 py-3 text-white flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Camera className="w-5 h-5" />
+                    <h3 className="font-black text-sm uppercase tracking-wider">
+                      Fotos das Peças Solicitadas
+                    </h3>
+                  </div>
+                  {totalPhotosCount > 0 && (
+                    <span className="text-[10px] font-black bg-white/20 px-2 py-0.5 rounded-full">
+                      {totalPhotosCount} {totalPhotosCount === 1 ? 'foto' : 'fotos'}
+                    </span>
+                  )}
+                </div>
+                <div className="p-4 space-y-3">
+                  {totalPhotosCount === 0 ? (
+                    <div className="aspect-video rounded-xl bg-slate-100 dark:bg-slate-800 border-2 border-dashed border-slate-300 dark:border-slate-700 flex flex-col items-center justify-center text-slate-400">
+                      <Camera className="w-12 h-12 mb-2 opacity-50" />
+                      <span className="text-sm font-medium">Sem foto anexada</span>
+                    </div>
+                  ) : (
+                    <>
+                      {mainPhotos.length > 0 && (
+                        <div>
+                          <span className="text-[10px] font-bold uppercase text-slate-500 block mb-1.5">
+                            Peça Principal ({mainPhotos.length} foto{mainPhotos.length > 1 ? 's' : ''}):
+                          </span>
+                          <div className={`grid gap-2 ${mainPhotos.length === 1 ? 'grid-cols-1' : 'grid-cols-2 sm:grid-cols-3'}`}>
+                            {mainPhotos.map((src, i) => (
+                              <div key={`main-${i}`} className="relative h-32 rounded-xl overflow-hidden bg-slate-900 border border-slate-200 dark:border-slate-700">
+                                <img src={src} alt={`Peça principal ${i + 1}`} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {extraGroups.map((grp, gIdx) => (
+                        <div key={`extra-grp-${gIdx}`} className="pt-2 border-t border-slate-200 dark:border-slate-800">
+                          <span className="text-[10px] font-bold uppercase text-purple-600 dark:text-purple-400 block mb-1.5">
+                            {grp.label} ({grp.photos.length} foto{grp.photos.length > 1 ? 's' : ''}):
+                          </span>
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                            {grp.photos.map((src, i) => (
+                              <div key={`extra-${gIdx}-${i}`} className="relative h-24 rounded-xl overflow-hidden bg-slate-900 border border-slate-200 dark:border-slate-700">
+                                <img src={src} alt={`${grp.label} ${i + 1}`} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
               </div>
-            </div>
-            <div className="p-4">
-              {request.mediaUrl ? (
-                <div className="relative aspect-video rounded-xl overflow-hidden bg-slate-900">
-                  <img src={request.mediaUrl} alt="Peça solicitada" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
-                </div>
-              ) : (
-                <div className="aspect-video rounded-xl bg-slate-100 dark:bg-slate-800 border-2 border-dashed border-slate-300 dark:border-slate-700 flex flex-col items-center justify-center text-slate-400">
-                  <Camera className="w-12 h-12 mb-2 opacity-50" />
-                  <span className="text-sm font-medium">Sem foto anexada</span>
-                </div>
-              )}
-            </div>
-          </div>
+            );
+          })()}
 
           {/* CARD 3: LOCAL DE ENTREGA (EMBAIXO) - width-full */}
           <div className="bg-white dark:bg-slate-900 rounded-2xl border-2 border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden w-full">
@@ -376,7 +434,7 @@ const OpportunitySpamModal: React.FC<OpportunitySpamModalProps> = ({
                 <div className="flex items-start gap-2">
                   <Lock className="w-4 h-4 shrink-0 mt-0.5 text-blue-600" />
                   <p>
-                    <strong>Sigilo AUTO SHOP:</strong> Você visualiza Distância Real (km), Cidade e Bairro. Rua, número, CEP e dados pessoais do cliente ficam ocultos até o pagamento.
+                    <strong>Sigilo AUTO SHOP:</strong> Você visualiza apenas Distância Real (km), Cidade e Bairro. Nome, WhatsApp, rua, número e CEP do cliente ficam ocultos até a confirmação do pagamento em conta.
                   </p>
                 </div>
               </div>
@@ -1378,7 +1436,7 @@ export const SupplierApp: React.FC<SupplierAppProps> = ({
                           )}
                           <div className="sm:col-span-2">
                             <span className="text-slate-400 block text-[10px] uppercase font-bold">
-                              Local de Entrega (Sigilo até Pagamento):
+                              Local de Entrega (Sigilo até Confirmação em Conta):
                             </span>
                             <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                               <span className="text-xs text-emerald-700 dark:text-emerald-300 font-black font-mono bg-emerald-50 dark:bg-emerald-950/70 border border-emerald-200 dark:border-emerald-800 px-2.5 py-1 rounded-lg flex items-center gap-1">
@@ -1403,7 +1461,7 @@ export const SupplierApp: React.FC<SupplierAppProps> = ({
                               )}
                               <span className="text-[11px] text-slate-500 flex items-center gap-1">
                                 <Lock className="w-3 h-3 text-amber-500" />
-                                Rua, número, CEP e cliente ocultos até pagamento
+                                Rua, número, CEP e cliente ocultos até confirmação do pagamento em conta
                               </span>
                             </div>
                           </div>
@@ -1416,21 +1474,45 @@ export const SupplierApp: React.FC<SupplierAppProps> = ({
                         )}
                       </div>
 
-                      {req.mediaUrl && (
-                        <div className="flex flex-col">
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
-                            Foto Original da Peça:
-                          </span>
-                          <div className="h-32 rounded-xl overflow-hidden bg-slate-950 border border-slate-200 dark:border-slate-800 shadow-sm">
-                            <img
-                              src={req.mediaUrl}
-                              alt="Foto da peça"
-                              className="w-full h-full object-cover"
-                              referrerPolicy="no-referrer"
-                            />
+                      {(() => {
+                        const mainPhotos =
+                          req.mediaUrls && req.mediaUrls.length > 0
+                            ? req.mediaUrls
+                            : req.mediaUrl
+                            ? [req.mediaUrl]
+                            : [];
+                        const extraPhotos = (req.extraParts || []).flatMap(ep => ep.mediaUrls || []);
+                        const allPhotos = [...mainPhotos, ...extraPhotos];
+                        if (allPhotos.length === 0) return null;
+
+                        return (
+                          <div className="flex flex-col">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
+                              Fotos das Peças ({allPhotos.length}):
+                            </span>
+                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                              {allPhotos.slice(0, 6).map((url, idx) => (
+                                <div
+                                  key={`${req.id}-photo-${idx}`}
+                                  className="relative h-20 rounded-xl overflow-hidden bg-slate-950 border border-slate-200 dark:border-slate-800 shadow-sm"
+                                >
+                                  <img
+                                    src={url}
+                                    alt={`Foto ${idx + 1} da peça`}
+                                    className="w-full h-full object-cover"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                  {idx === 5 && allPhotos.length > 6 && (
+                                    <div className="absolute inset-0 bg-black/70 text-white font-black text-xs flex items-center justify-center">
+                                      +{allPhotos.length - 6}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        );
+                      })()}
                     </div>
 
                     <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center gap-3">
@@ -1492,6 +1574,15 @@ export const SupplierApp: React.FC<SupplierAppProps> = ({
                 const unreadChat = db.getUnreadChatCountForOrder(currentUser.id, order.requestId, order.id);
                 const unreadSac = db.getUnreadChatCountForOrder(currentUser.id, order.requestId, order.id, true);
                 const isWaitingReceiptConfirm = order.paymentStatus === 'confirmado' && order.supplierReceiptConfirmed !== true;
+                const identityUnlocked = isOrderIdentityUnlocked(order, 'fornecedor');
+                const matchedQuote = db.getQuotes(order.requestId).find(q => q.id === order.quoteId);
+                const distDetails = req ? db.getDistanceDetailsSupplierToRequest(currentUser, req) : null;
+                const distKm = matchedQuote?.distanceKm ?? distDetails?.distanceKm ?? null;
+                const maskedCustomerLabel = getMaskedCounterpartyLabel('cliente', order.customerId);
+                const chatCustomerName = identityUnlocked
+                  ? (customer?.name || maskedCustomerLabel)
+                  : maskedCustomerLabel;
+                const chatCustomerAvatar = identityUnlocked ? customer?.avatarUrl : undefined;
 
                 return (
                   <div
@@ -1511,7 +1602,7 @@ export const SupplierApp: React.FC<SupplierAppProps> = ({
                               VENDA CONFIRMADA, VERIFIQUE SE O VALOR JÁ ESTÁ NA CONTA!
                             </strong>
                             <span className="text-amber-800 dark:text-amber-300">
-                              Verifique se o dinheiro caiu na sua conta e clique em CONFIRMAR para separar e enviar a encomenda.
+                              Verifique se o dinheiro caiu na sua conta e clique em CONFIRMAR para desbloquear nome, WhatsApp, endereço do cliente e liberar a expedição.
                             </span>
                           </div>
                         </div>
@@ -1568,7 +1659,9 @@ export const SupplierApp: React.FC<SupplierAppProps> = ({
                       <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs space-y-2">
                         <div className="flex items-center justify-between gap-2 flex-wrap">
                           <span className="text-[10px] font-bold text-blue-600 uppercase tracking-wider block">
-                            Dados do Comprador & Entrega da Cotação (Liberados após pagamento):
+                            {identityUnlocked
+                              ? 'Dados do Comprador & Entrega (Liberados após confirmação em conta):'
+                              : 'Dados da Venda & Região (Sigilo ativo até confirmar recebimento em conta):'}
                           </span>
                           <div className="flex items-center gap-2">
                             {unreadSac > 0 && (
@@ -1579,8 +1672,8 @@ export const SupplierApp: React.FC<SupplierAppProps> = ({
                                     requestId: order.requestId,
                                     orderId: order.id,
                                     requestNumber: order.orderNumber,
-                                    customerName: customer?.name || 'Cliente AUTO SHOP',
-                                    customerAvatar: customer?.avatarUrl,
+                                    customerName: chatCustomerName,
+                                    customerAvatar: chatCustomerAvatar,
                                   })
                                 }
                                 className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-black text-xs flex items-center gap-1.5 ring-2 ring-amber-300 animate-pulse shadow-lg shadow-red-500/40 cursor-pointer"
@@ -1600,8 +1693,8 @@ export const SupplierApp: React.FC<SupplierAppProps> = ({
                                   requestId: order.requestId,
                                   orderId: order.id,
                                   requestNumber: order.orderNumber,
-                                  customerName: customer?.name || 'Cliente AUTO SHOP',
-                                  customerAvatar: customer?.avatarUrl,
+                                  customerName: chatCustomerName,
+                                  customerAvatar: chatCustomerAvatar,
                                 })
                               }
                               className={`px-3 py-1.5 rounded-xl text-white font-black text-xs flex items-center gap-1.5 cursor-pointer transition ${
@@ -1621,47 +1714,80 @@ export const SupplierApp: React.FC<SupplierAppProps> = ({
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 rounded-xl overflow-hidden bg-slate-200 dark:bg-slate-700 shrink-0 flex items-center justify-center">
-                            {customer?.avatarUrl ? (
-                              <img
-                                src={customer.avatarUrl}
-                                alt={customer.name}
-                                className="w-full h-full object-cover"
-                              />
-                            ) : (
-                              <UserCheck className="w-5 h-5 text-blue-600" />
-                            )}
-                          </div>
-                          <div>
-                            <strong className="block text-slate-900 dark:text-white font-black text-sm">
-                              {customer?.name}
-                            </strong>
-                            <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 mt-0.5">
-                              <span>
-                                WhatsApp: <strong className="font-mono">{customer?.phone}</strong>
-                              </span>
+                        {identityUnlocked ? (
+                          <>
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl overflow-hidden bg-slate-200 dark:bg-slate-700 shrink-0 flex items-center justify-center">
+                                {customer?.avatarUrl ? (
+                                  <img
+                                    src={customer.avatarUrl}
+                                    alt={customer.name}
+                                    className="w-full h-full object-cover"
+                                  />
+                                ) : (
+                                  <UserCheck className="w-5 h-5 text-blue-600" />
+                                )}
+                              </div>
+                              <div>
+                                <strong className="block text-slate-900 dark:text-white font-black text-sm">
+                                  {customer?.name}
+                                </strong>
+                                <div className="flex items-center gap-2 text-slate-600 dark:text-slate-400 mt-0.5">
+                                  <span>
+                                    WhatsApp: <strong className="font-mono">{customer?.phone}</strong>
+                                  </span>
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                        </div>
 
-                        {deliveryAddress && (
-                          <div className="text-slate-700 dark:text-slate-200 flex items-start gap-1.5 pt-2 border-t border-slate-200 dark:border-slate-700 text-[11px]">
-                            <MapPin className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
-                            <div>
-                              <span className="font-black text-blue-700 dark:text-blue-300 mr-1.5 font-mono">
-                                CEP: {deliveryAddress.cep || 'N/A'} ·
-                              </span>
-                              <span className="font-semibold">
-                                {deliveryAddress.street}, {deliveryAddress.number}{' '}
-                                {deliveryAddress.complement
-                                  ? `(${deliveryAddress.complement})`
-                                  : ''}{' '}
-                                - {deliveryAddress.neighborhood}, {deliveryAddress.city}/
-                                {deliveryAddress.state}
-                              </span>
-                              <span className="block text-[10px] text-slate-400">
-                                Endereço cadastrado na cotação da peça
+                            {deliveryAddress && (
+                              <div className="text-slate-700 dark:text-slate-200 flex items-start gap-1.5 pt-2 border-t border-slate-200 dark:border-slate-700 text-[11px]">
+                                <MapPin className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
+                                <div>
+                                  <span className="font-black text-blue-700 dark:text-blue-300 mr-1.5 font-mono">
+                                    CEP: {deliveryAddress.cep || 'N/A'} ·
+                                  </span>
+                                  <span className="font-semibold">
+                                    {deliveryAddress.street}, {deliveryAddress.number}{' '}
+                                    {deliveryAddress.complement
+                                      ? `(${deliveryAddress.complement})`
+                                      : ''}{' '}
+                                    - {deliveryAddress.neighborhood}, {deliveryAddress.city}/
+                                    {deliveryAddress.state}
+                                  </span>
+                                  <span className="block text-[10px] text-slate-400">
+                                    Endereço cadastrado na cotação da peça
+                                  </span>
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 shrink-0 flex items-center justify-center">
+                                <Lock className="w-5 h-5 text-amber-600" />
+                              </div>
+                              <div>
+                                <strong className="block text-slate-900 dark:text-white font-black text-sm">
+                                  {maskedCustomerLabel}
+                                </strong>
+                                <div className="flex flex-wrap items-center gap-2 text-slate-600 dark:text-slate-400 mt-0.5">
+                                  <span className="font-mono font-bold text-emerald-700 dark:text-emerald-300">
+                                    {distKm !== null ? `${distKm.toFixed(1)} km reais` : 'Distância calculada via CEP'}
+                                  </span>
+                                  <span>·</span>
+                                  <span className="font-semibold">
+                                    {formatCityNeighborhood(deliveryAddress)}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-[11px] text-amber-900 dark:text-amber-200 flex items-start gap-1.5">
+                              <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                              <span>
+                                <strong>Sigilo de Contato & Endereço:</strong> Nome completo, WhatsApp, rua, número e CEP ficam protegidos até você confirmar que o valor entrou na sua conta. Compra: <strong>{order.partName}</strong> (Total: R$ {order.totalAmount.toFixed(2)}).
                               </span>
                             </div>
                           </div>

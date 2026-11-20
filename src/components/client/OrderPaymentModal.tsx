@@ -16,6 +16,10 @@ import {
 } from 'lucide-react';
 import { Quote, PartRequest, PaymentMethod, OrderAndPayment } from '../../types';
 import { db } from '../../services/db';
+import {
+  getMaskedCounterpartyLabel,
+  formatCityNeighborhood,
+} from '../../services/rbac';
 
 interface OrderPaymentModalProps {
   quote: Quote;
@@ -143,9 +147,9 @@ export const OrderPaymentModal: React.FC<OrderPaymentModalProps> = ({
             </span>
           </div>
 
-          <div className="pt-2 border-t border-slate-200 dark:border-slate-700 grid grid-cols-2 gap-2 text-xs">
+          <div className="pt-2 border-t border-slate-200 dark:border-slate-700 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
             <div>
-              <span className="text-slate-500 block">Endereço de Entrega:</span>
+              <span className="text-slate-500 block">Seu Endereço de Entrega:</span>
               <span className="font-semibold text-slate-800 dark:text-slate-200">
                 {request.deliveryAddress.street}, {request.deliveryAddress.number}
               </span>
@@ -154,12 +158,22 @@ export const OrderPaymentModal: React.FC<OrderPaymentModalProps> = ({
               </span>
             </div>
             <div>
-              <span className="text-slate-500 block">Prazo & Garantia:</span>
-              <span className="font-semibold text-slate-800 dark:text-slate-200">
-                {quote.deliveryDays} dia(s) útil(eis) · {quote.warrantyDays} dias de garantia
+              <span className="text-slate-500 block">Fornecedor & Localização (Sigilo):</span>
+              <span className="font-bold text-slate-800 dark:text-slate-200 block">
+                {getMaskedCounterpartyLabel('fornecedor', quote.supplierId)}
+              </span>
+              <span className="text-emerald-700 dark:text-emerald-400 font-mono font-bold block">
+                {realDistanceKm !== null ? `${realDistanceKm.toFixed(1)} km reais · ` : ''}
+                {formatCityNeighborhood(supplierUser?.address)}
+              </span>
+              <span className="text-slate-500 block">
+                Prazo: {quote.deliveryDays} dia(s) · Garantia {quote.warrantyDays} dias
               </span>
             </div>
           </div>
+          <p className="text-[11px] text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-lg px-2.5 py-1.5">
+            Sigilo de dados: Nome da loja, WhatsApp, foto/logo e endereço do fornecedor só são exibidos após ele confirmar o dinheiro em conta.
+          </p>
         </div>
 
         {/* Split com a taxa do Fornecedor (definida pelo Admin) */}
@@ -173,7 +187,7 @@ export const OrderPaymentModal: React.FC<OrderPaymentModalProps> = ({
               Frete Especializado
               {realDistanceKm !== null && (
                 <span className="ml-1.5 text-[11px] font-mono font-bold text-emerald-700 dark:text-emerald-400">
-                  ({realDistanceKm.toFixed(1)} km reais · CEP {request.deliveryAddress.cep})
+                  ({realDistanceKm.toFixed(1)} km reais)
                 </span>
               )}
               :
@@ -184,8 +198,7 @@ export const OrderPaymentModal: React.FC<OrderPaymentModalProps> = ({
           <div className="p-2.5 rounded-lg bg-blue-50/60 dark:bg-blue-950/40 border border-blue-100 dark:border-blue-900/60 text-[11px] space-y-1">
             <div className="flex items-center justify-between text-blue-900 dark:text-blue-300 font-medium">
               <span>
-                Repasse ao Fornecedor via Split
-                {supplierUser?.gatewayWalletId ? ` (${supplierUser.gatewayWalletId})` : ''}:
+                Repasse via Split ({getMaskedCounterpartyLabel('fornecedor', quote.supplierId)}):
               </span>
               <span className="font-mono font-bold">R$ {supplierAmount.toFixed(2)}</span>
             </div>

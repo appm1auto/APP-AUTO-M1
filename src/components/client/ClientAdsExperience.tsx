@@ -43,8 +43,6 @@ export const ClientAdsExperience: React.FC<ClientAdsExperienceProps> = ({ curren
   const [settings, setSettings] = useState<ClientAdsSettings>(() => db.getClientAdsSettings());
   const [currentIndex, setCurrentIndex] = useState(0);
   const [userPaused, setUserPaused] = useState(false);
-  const [periodicVisible, setPeriodicVisible] = useState(true);
-  const [footerHiddenByUser, setFooterHiddenByUser] = useState(false);
 
   // Startup splash (3 seconds default, configurable by Admin; triggers once per app open/mount)
   const [splashOpen, setSplashOpen] = useState(false);
@@ -62,13 +60,6 @@ export const ClientAdsExperience: React.FC<ClientAdsExperienceProps> = ({ curren
       unsub();
     };
   }, []);
-
-  // Reabre rodapé caso Admin atualize modo ou ative novamente
-  useEffect(() => {
-    if (settings.footerEnabled) {
-      setFooterHiddenByUser(false);
-    }
-  }, [settings.footerEnabled, settings.footerMode, settings.updatedAt]);
 
   const activeItems = useMemo(
     () =>
@@ -144,38 +135,25 @@ export const ClientAdsExperience: React.FC<ClientAdsExperienceProps> = ({ curren
     userPaused,
   ]);
 
-  // Periodic ("de tempos em tempos") show/hide & advance cycle
+  // Periodic ("de tempos em tempos") mantém a propaganda na tela e avança o slide apenas no tempo definido pelo Admin
   useEffect(() => {
-    if (!settings.enabled || !settings.footerEnabled || activeItems.length === 0) return;
-    if (settings.footerMode !== 'periodic') {
-      setPeriodicVisible(true);
-      return;
-    }
+    if (!settings.enabled || !settings.footerEnabled || activeItems.length <= 1) return;
+    if (settings.footerMode !== 'periodic' || userPaused) return;
 
-    const showMs = Math.max(2, Number(settings.periodicDurationSeconds) || 8) * 1000;
     const waitMs = Math.max(2, Number(settings.periodicIntervalSeconds) || 20) * 1000;
-
-    const timer = setTimeout(
-      () => {
-        if (periodicVisible) {
-          setPeriodicVisible(false);
-        } else {
-          setCurrentIndex(prev => (prev + 1) % activeItems.length);
-          setPeriodicVisible(true);
-        }
-      },
-      periodicVisible ? showMs : waitMs
-    );
+    const timer = setTimeout(() => {
+      setCurrentIndex(prev => (prev + 1) % activeItems.length);
+    }, waitMs);
 
     return () => clearTimeout(timer);
   }, [
     settings.enabled,
     settings.footerEnabled,
     settings.footerMode,
-    settings.periodicDurationSeconds,
     settings.periodicIntervalSeconds,
     activeItems.length,
-    periodicVisible,
+    currentIndex,
+    userPaused,
   ]);
 
   if (!settings.enabled || activeItems.length === 0) return null;
@@ -190,11 +168,7 @@ export const ClientAdsExperience: React.FC<ClientAdsExperienceProps> = ({ curren
       : null;
 
   const displayedAd = fixedAd || activeItems[currentIndex % activeItems.length];
-  const showFooterBar =
-    settings.footerEnabled &&
-    !footerHiddenByUser &&
-    (settings.footerMode !== 'periodic' || periodicVisible) &&
-    Boolean(displayedAd);
+  const showFooterBar = settings.footerEnabled && Boolean(displayedAd);
 
   const size = settings.footerSize || 'medium';
   const splashLink = sanitizeHref(splashAd?.linkUrl);
@@ -467,16 +441,6 @@ export const ClientAdsExperience: React.FC<ClientAdsExperienceProps> = ({ curren
                   </button>
                 </div>
               )}
-
-              <button
-                type="button"
-                onClick={() => setFooterHiddenByUser(true)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
-                title="Minimizar anúncios"
-                aria-label="Fechar barra de anúncios"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
             </div>
           </div>
 
@@ -498,19 +462,6 @@ export const ClientAdsExperience: React.FC<ClientAdsExperienceProps> = ({ curren
             </div>
           )}
         </aside>
-      )}
-
-      {settings.footerEnabled && footerHiddenByUser && (
-        <div className="mt-4 flex justify-end">
-          <button
-            type="button"
-            onClick={() => setFooterHiddenByUser(false)}
-            className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-[11px] flex items-center gap-1.5 shadow-md cursor-pointer"
-          >
-            <Megaphone className="w-3.5 h-3.5" />
-            <span>Mostrar Anúncios</span>
-          </button>
-        </div>
       )}
     </>
   );

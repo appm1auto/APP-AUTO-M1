@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { User, UserRole } from '../types/index.ts';
+import type { DeliveryAddress, OrderAndPayment, User, UserRole } from '../types/index.ts';
 
 export type AppRoute =
   | '/login'
@@ -245,3 +245,43 @@ export function getRoleDisplayName(role: UserRole): string {
       return 'Administrador Master';
   }
 }
+
+/**
+ * Regra de Privacidade:
+ * Dados pessoais (nome, razão social, foto/logo, WhatsApp/telefone, CPF/CNPJ, CEP, rua e número)
+ * do cliente e do fornecedor SOMENTE ficam visíveis após A CONFIRMAÇÃO DO PAGAMENTO POR PARTE DO
+ * FORNECEDOR (confirmação do dinheiro em conta: supplierReceiptConfirmed === true && paymentStatus === 'confirmado').
+ * O Administrador sempre tem acesso completo.
+ */
+export function isOrderIdentityUnlocked(
+  order?: Pick<OrderAndPayment, 'paymentStatus' | 'supplierReceiptConfirmed'> | null,
+  viewerRole?: UserRole
+): boolean {
+  if (viewerRole === 'admin') return true;
+  return Boolean(
+    order &&
+      order.paymentStatus === 'confirmado' &&
+      order.supplierReceiptConfirmed === true
+  );
+}
+
+export function getMaskedCounterpartyLabel(
+  role: 'cliente' | 'fornecedor',
+  id?: string
+): string {
+  const suffix = id ? id.slice(-4).toUpperCase() : '0000';
+  return role === 'fornecedor'
+    ? `Fornecedor Certificado #${suffix}`
+    : `Cliente Verificado #${suffix}`;
+}
+
+export function formatCityNeighborhood(addr?: Partial<DeliveryAddress> | null): string {
+  if (!addr) return 'Cidade/Bairro via CEP';
+  const neighborhood = addr.neighborhood?.trim();
+  const city = addr.city?.trim();
+  const state = addr.state?.trim()?.toUpperCase();
+  const cityLabel = city ? (state ? `${city}/${state}` : city) : '';
+  const parts = [neighborhood, cityLabel].filter(Boolean);
+  return parts.length > 0 ? parts.join(' · ') : 'Localização via KM';
+}
+

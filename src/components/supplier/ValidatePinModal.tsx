@@ -16,6 +16,11 @@ import {
 import { OrderAndPayment } from '../../types';
 import { db } from '../../services/db';
 import { soundEffects } from '../../services/sound';
+import {
+  isOrderIdentityUnlocked,
+  getMaskedCounterpartyLabel,
+  formatCityNeighborhood,
+} from '../../services/rbac';
 
 interface ValidatePinModalProps {
   order: OrderAndPayment;
@@ -38,6 +43,9 @@ export const ValidatePinModal: React.FC<ValidatePinModalProps> = ({
   const [validating, setValidating] = useState(false);
 
   const customer = db.getUserById(order.customerId);
+  const req = db.getRequestById(order.requestId);
+  const deliveryAddress = order.deliveryAddress || req?.deliveryAddress;
+  const identityUnlocked = isOrderIdentityUnlocked(order, 'fornecedor');
 
   // Validação pelo PIN digitado pelo entregador
   const handleValidatePin = (e: React.FormEvent) => {
@@ -114,10 +122,12 @@ export const ValidatePinModal: React.FC<ValidatePinModalProps> = ({
             <span className="text-slate-500">Peça:</span>
             <strong className="text-slate-900 dark:text-white">{order.partName}</strong>
           </div>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <span className="text-slate-500">Cliente:</span>
-            <span className="font-semibold text-slate-800 dark:text-slate-200">
-              {customer?.name} ({customer?.phone})
+            <span className="font-semibold text-slate-800 dark:text-slate-200 text-right">
+              {identityUnlocked
+                ? `${customer?.name || 'Cliente'} (${customer?.phone || '—'})`
+                : `${getMaskedCounterpartyLabel('cliente', order.customerId)} · ${formatCityNeighborhood(deliveryAddress)}`}
             </span>
           </div>
           <div className="flex items-center justify-between pt-1 border-t border-slate-200 dark:border-slate-700">

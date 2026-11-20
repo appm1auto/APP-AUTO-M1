@@ -22,11 +22,17 @@ import {
   Camera,
   Upload,
   Bike,
-  Hourglass
+  Hourglass,
+  Lock
 } from 'lucide-react';
 import { OrderAndPayment, User } from '../../types';
 import { db } from '../../services/db';
 import { OrderChatModal } from '../common/OrderChatModal';
+import {
+  isOrderIdentityUnlocked,
+  getMaskedCounterpartyLabel,
+  formatCityNeighborhood,
+} from '../../services/rbac';
 
 interface DeliveryTrackingModalProps {
   order: OrderAndPayment;
@@ -62,7 +68,13 @@ export const DeliveryTrackingModal: React.FC<DeliveryTrackingModalProps> = ({
   const liveOrder = db.getOrderById(order.id) || order;
   const supplier = db.getUserById(liveOrder.supplierId);
   const customer = db.getUserById(customerId);
+  const req = db.getRequestById(liveOrder.requestId);
   const unreadChatCount = db.getUnreadChatCountForOrder(customerId, liveOrder.requestId, liveOrder.id);
+  const identityUnlocked = isOrderIdentityUnlocked(liveOrder, 'cliente');
+  const matchedQuote = db.getQuotes(liveOrder.requestId).find(q => q.id === liveOrder.quoteId);
+  const distDetails = req ? db.getDistanceDetailsSupplierToRequest(supplier, req) : null;
+  const distKm = matchedQuote?.distanceKm ?? distDetails?.distanceKm ?? null;
+  const maskedSupplierName = getMaskedCounterpartyLabel('fornecedor', liveOrder.supplierId);
 
   // Status mapping
   const steps = [
@@ -114,24 +126,53 @@ export const DeliveryTrackingModal: React.FC<DeliveryTrackingModalProps> = ({
             {liveOrder.partName}
           </h2>
 
-          {/* Dados do Fornecedor Desbloqueados após Aprovação do Orçamento */}
+          {/* Dados do Fornecedor: só desbloqueados após confirmação do recebimento em conta pelo fornecedor */}
           <div className="mt-3 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-2.5">
-              <div className="w-10 h-10 rounded-xl overflow-hidden bg-slate-200 dark:bg-slate-700 border border-slate-300 dark:border-slate-600 flex items-center justify-center shrink-0">
-                {supplier?.avatarUrl ? (
-                  <img src={supplier.avatarUrl} alt={supplier.companyName || supplier.name} className="w-full h-full object-cover" />
+            <div className="flex items-start gap-2.5">
+              <div className={`w-10 h-10 rounded-xl overflow-hidden flex items-center justify-center shrink-0 ${
+                identityUnlocked
+                  ? 'bg-slate-200 dark:bg-slate-700 border border-slate-300 dark:border-slate-600'
+                  : 'bg-amber-100 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800'
+              }`}>
+                {identityUnlocked ? (
+                  supplier?.avatarUrl ? (
+                    <img src={supplier.avatarUrl} alt={supplier.companyName || supplier.name} className="w-full h-full object-cover" />
+                  ) : (
+                    <Store className="w-5 h-5 text-emerald-600" />
+                  )
                 ) : (
-                  <Store className="w-5 h-5 text-emerald-600" />
+                  <Lock className="w-5 h-5 text-amber-600" />
                 )}
               </div>
               <div>
                 <strong className="block text-xs font-black text-slate-900 dark:text-white">
-                  {supplier?.companyName || supplier?.name || 'Fornecedor'}
+                  {identityUnlocked ? (supplier?.companyName || supplier?.name || 'Fornecedor') : maskedSupplierName}
                 </strong>
-                <span className="text-[11px] text-slate-500 font-mono flex items-center gap-1">
-                  <Phone className="w-3 h-3 text-emerald-600" />
-                  WhatsApp: {supplier?.phone || '—'}
-                </span>
+                {identityUnlocked ? (
+                  <div className="space-y-0.5">
+                    <span className="text-[11px] text-slate-500 font-mono flex items-center gap-1">
+                      <Phone className="w-3 h-3 text-emerald-600" />
+                      WhatsApp: {supplier?.phone || '—'}
+                    </span>
+                    {supplier?.address && (
+                      <span className="text-[11px] text-slate-500 block">
+                        <MapPin className="w-3 h-3 text-blue-600 inline mr-1" />
+                        {supplier.address.street}, {supplier.address.number} - {supplier.address.neighborhood}, {supplier.address.city}/{supplier.address.state}
+                        {supplier.address.cep ? ` · CEP ${supplier.address.cep}` : ''}
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-0.5">
+                    <span className="text-[11px] text-emerald-700 dark:text-emerald-300 font-mono font-bold block">
+                      {distKm !== null ? `${distKm.toFixed(1)} km reais · ` : ''}
+                      {formatCityNeighborhood(supplier?.address)}
+                    </span>
+                    <span className="text-[10px] text-amber-700 dark:text-amber-300 block">
+                      Nome, WhatsApp e endereço do fornecedor liberados após confirmação em conta.
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -242,8 +283,8 @@ export const DeliveryTrackingModal: React.FC<DeliveryTrackingModalProps> = ({
           </div>
         </div>
 
-        {/* Motoboy & Expedição Informações (§10) */}
-        {(liveOrder.motoboyName || liveOrder.trackingCode) && (
+        {/* Motoboy & Expedição Informações (§10) - somente após liberação */}
+        {identityUnlocked && (liveOrder.motoboyName || liveOrder.trackingCode) && (
           <div className="mt-4 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 space-y-2">
             <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-700">
               <span className="text-xs font-black uppercase text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
@@ -449,9 +490,9 @@ export const DeliveryTrackingModal: React.FC<DeliveryTrackingModalProps> = ({
           requestId={liveOrder.requestId}
           orderId={liveOrder.id}
           requestNumber={liveOrder.orderNumber}
-          otherPartyName={supplier?.companyName || supplier?.name || 'Fornecedor Credenciado'}
+          otherPartyName={identityUnlocked ? (supplier?.companyName || supplier?.name || maskedSupplierName) : maskedSupplierName}
           otherPartyRole="fornecedor"
-          otherPartyAvatar={supplier?.avatarUrl}
+          otherPartyAvatar={identityUnlocked ? supplier?.avatarUrl : undefined}
           onClose={() => setIsChatOpen(false)}
         />
       )}

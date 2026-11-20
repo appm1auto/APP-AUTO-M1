@@ -15,6 +15,8 @@ import {
   getDefaultRouteForUser,
   getPortalTargetFromLocation,
   isSupplierClassifiedAndApproved,
+  isOrderIdentityUnlocked,
+  getMaskedCounterpartyLabel,
   parseHashRoute,
   syncHashRoute,
 } from './services/rbac';
@@ -246,7 +248,9 @@ export default function App() {
           : 'Localização protegida por sigilo AUTO SHOP até confirmação do pagamento';
       })(),
       distanceKm,
-      mediaUrl: req.mediaUrl,
+      mediaUrl: req.mediaUrl || req.mediaUrls?.[0],
+      mediaUrls: req.mediaUrls && req.mediaUrls.length > 0 ? req.mediaUrls : (req.mediaUrl ? [req.mediaUrl] : undefined),
+      extraParts: req.extraParts,
       mediaType: req.mediaType || 'photo',
       supplierTier: supplier.supplierTier || 'opcao_2',
       supplierId: supplier.id,
@@ -377,15 +381,20 @@ export default function App() {
       soundEffects.playConfiguredEvent('mensagem_chat');
 
       const otherUser = db.getUserById(msg.senderId);
+      const identityUnlocked = isOrderIdentityUnlocked(ord, user.role);
+      const isCounterparty = msg.senderRole === 'cliente' || msg.senderRole === 'fornecedor';
+      const shouldMaskSender = isCounterparty && !identityUnlocked;
 
       setActiveChatAlert({
         msg,
         requestId: reqId || ord?.requestId || '',
         orderId: msg.orderId || ord?.id,
         requestNumber: ord?.orderNumber || req?.requestNumber || 'PEDIDO',
-        otherPartyName: otherUser?.companyName || otherUser?.name || msg.senderName,
+        otherPartyName: shouldMaskSender
+          ? getMaskedCounterpartyLabel(msg.senderRole === 'fornecedor' ? 'fornecedor' : 'cliente', msg.senderId)
+          : otherUser?.companyName || otherUser?.name || msg.senderName,
         otherPartyRole: msg.senderRole,
-        otherPartyAvatar: otherUser?.avatarUrl,
+        otherPartyAvatar: shouldMaskSender ? undefined : otherUser?.avatarUrl,
       });
     };
 
@@ -448,6 +457,10 @@ export default function App() {
       setActiveSpam(null);
     };
 
+    const saleIdentityUnlocked = isOrderIdentityUnlocked(order, 'fornecedor');
+    const saleDistKm = supplier && req ? db.getDistanceSupplierToRequestKm(supplier, req) ?? undefined : undefined;
+    const saleAddr = order.deliveryAddress || req?.deliveryAddress;
+
     setActiveSpam({
       config: saleTemplate || {
         id: `spam_sale_${order.id}`,
@@ -462,6 +475,7 @@ export default function App() {
         isMandatoryAction: true,
         actionButtonLabel: 'CONFIRMO O PAGAMENTO',
       },
+      viewerRole: 'fornecedor',
       orderId: order.id,
       orderNumber: order.orderNumber,
       requestId: order.requestId,
@@ -480,10 +494,16 @@ export default function App() {
       splitStatusText,
       shippingMethodText: 'Motoboy Express / Transportadora',
       cancellationWarning: order.cancellationPenaltyNotice,
-      // Neste SPAM vai SOMENTE o nome do cliente + dados de pagamento/conta (sem telefone, CPF/CNPJ ou endereço completo)
-      customerName: customer?.name || 'Cliente AUTO SHOP',
-      customerPhotoUrl: customer?.avatarUrl,
+      distanceKm: saleDistKm,
+      city: saleAddr?.city,
+      neighborhood: saleAddr?.neighborhood,
+      customerName: saleIdentityUnlocked
+        ? customer?.name || 'Cliente AUTO SHOP'
+        : getMaskedCounterpartyLabel('cliente', order.customerId),
+      customerPhotoUrl: saleIdentityUnlocked ? customer?.avatarUrl : undefined,
       mediaUrl: req?.mediaUrl,
+      mediaUrls: req?.mediaUrls,
+      extraParts: req?.extraParts,
       onSnoozeWaitingPayment: () => {
         const reopenAt = Date.now() + 10 * 60 * 1000;
         setSnoozedOrders(prev => ({ ...prev, [order.id]: reopenAt }));
@@ -826,7 +846,11 @@ export default function App() {
       </footer>
 
       {/* SPAM Overlay (somente usuário autenticado) */}
-      {currentUser && <SpamOverlay spam={activeSpam} />}
+      {currentUser && (
+        <SpamOverlay
+          spam={activeSpam ? { ...activeSpam, viewerRole: currentUser.role } : null}
+        />
+      )}
 
       {/* ALARME VISUAL PISCANTE EM NEON PARA CHAT RECEBIDO (somente autenticado) */}
       {currentUser && activeChatAlert && (

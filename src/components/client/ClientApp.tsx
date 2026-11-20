@@ -40,7 +40,12 @@ import { ManufacturerCatalogHub } from '../catalogs/ManufacturerCatalogHub';
 import { ClientAdsExperience } from './ClientAdsExperience';
 import { OrderChatModal } from '../common/OrderChatModal';
 import { BookOpen, Lock } from 'lucide-react';
-import { hasPermission } from '../../services/rbac';
+import {
+  hasPermission,
+  isOrderIdentityUnlocked,
+  getMaskedCounterpartyLabel,
+  formatCityNeighborhood,
+} from '../../services/rbac';
 
 interface ClientAppProps {
   currentUser: User;
@@ -636,21 +641,59 @@ export const ClientApp: React.FC<ClientAppProps> = ({
 
                       {/* Conteúdo Principal do Card */}
                       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                        {photoToShow && (
-                          <div className="relative w-full h-32 md:h-28 rounded-xl overflow-hidden bg-slate-950 border border-slate-200 dark:border-slate-800 shrink-0">
-                            <img
-                              src={photoToShow}
-                              alt={req.partName}
-                              className="w-full h-full object-cover"
-                              referrerPolicy="no-referrer"
-                            />
-                            <span className="absolute bottom-1 left-1 text-[9px] font-bold px-1.5 py-0.5 rounded bg-black/70 text-white">
-                              {bestQuote?.condition ? `Condição: ${bestQuote.condition.toUpperCase()}` : 'Foto da Peça'}
-                            </span>
-                          </div>
-                        )}
+                        {(() => {
+                          const reqPhotos =
+                            req.mediaUrls && req.mediaUrls.length > 0
+                              ? req.mediaUrls
+                              : req.mediaUrl
+                              ? [req.mediaUrl]
+                              : [];
+                          const extraPhotos = (req.extraParts || []).flatMap(ep => ep.mediaUrls || []);
+                          const allPhotos = [...reqPhotos, ...extraPhotos];
+                          const fallbackPhoto = allPhotos.length === 0 && bestQuote?.photoUrl ? [bestQuote.photoUrl] : [];
+                          const gallery = allPhotos.length > 0 ? allPhotos : fallbackPhoto;
 
-                        <div className={`${photoToShow ? 'md:col-span-3' : 'md:col-span-4'} space-y-2`}>
+                          if (gallery.length === 0) return null;
+                          return (
+                            <div className="space-y-1.5">
+                              <div className="relative w-full h-32 md:h-28 rounded-xl overflow-hidden bg-slate-950 border border-slate-200 dark:border-slate-800 shrink-0">
+                                <img
+                                  src={gallery[0]}
+                                  alt={req.partName}
+                                  className="w-full h-full object-cover"
+                                  referrerPolicy="no-referrer"
+                                />
+                                <span className="absolute bottom-1 left-1 text-[9px] font-bold px-1.5 py-0.5 rounded bg-black/75 text-white">
+                                  {allPhotos.length > 1
+                                    ? `${allPhotos.length} fotos anexadas`
+                                    : bestQuote?.condition
+                                    ? `Condição: ${bestQuote.condition.toUpperCase()}`
+                                    : 'Foto da Peça'}
+                                </span>
+                              </div>
+                              {allPhotos.length > 1 && (
+                                <div className="flex gap-1 overflow-x-auto">
+                                  {allPhotos.slice(1, 5).map((u, idx) => (
+                                    <img
+                                      key={`${req.id}-thumb-${idx}`}
+                                      src={u}
+                                      alt={`Foto ${idx + 2}`}
+                                      className="w-10 h-10 rounded-lg object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                                      referrerPolicy="no-referrer"
+                                    />
+                                  ))}
+                                  {allPhotos.length > 5 && (
+                                    <div className="w-10 h-10 rounded-lg bg-slate-800 text-white text-[10px] font-black flex items-center justify-center shrink-0">
+                                      +{allPhotos.length - 5}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+
+                        <div className={`${(req.mediaUrls?.length || req.mediaUrl || (req.extraParts || []).some(e => e.mediaUrls?.length) || bestQuote?.photoUrl) ? 'md:col-span-3' : 'md:col-span-4'} space-y-2`}>
                           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                             <h4 className="text-lg font-black text-slate-900 dark:text-white">
                               {req.partName}
@@ -886,18 +929,56 @@ export const ClientApp: React.FC<ClientAppProps> = ({
                     )}
 
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                      {photoToShow && (
-                        <div className="w-full h-28 rounded-xl overflow-hidden bg-slate-950 border border-slate-200 dark:border-slate-800 shrink-0">
-                          <img
-                            src={photoToShow}
-                            alt={req.partName}
-                            className="w-full h-full object-cover"
-                            referrerPolicy="no-referrer"
-                          />
-                        </div>
-                      )}
+                      {(() => {
+                        const reqPhotos =
+                          req.mediaUrls && req.mediaUrls.length > 0
+                            ? req.mediaUrls
+                            : req.mediaUrl
+                            ? [req.mediaUrl]
+                            : [];
+                        const extraPhotos = (req.extraParts || []).flatMap(ep => ep.mediaUrls || []);
+                        const allPhotos = [...reqPhotos, ...extraPhotos];
+                        const gallery = allPhotos.length > 0 ? allPhotos : (photoToShow ? [photoToShow] : []);
 
-                      <div className={`${photoToShow ? 'md:col-span-3' : 'md:col-span-4'} space-y-1.5`}>
+                        if (gallery.length === 0) return null;
+                        return (
+                          <div className="space-y-1.5">
+                            <div className="relative w-full h-28 rounded-xl overflow-hidden bg-slate-950 border border-slate-200 dark:border-slate-800 shrink-0">
+                              <img
+                                src={gallery[0]}
+                                alt={req.partName}
+                                className="w-full h-full object-cover"
+                                referrerPolicy="no-referrer"
+                              />
+                              {allPhotos.length > 1 && (
+                                <span className="absolute bottom-1 left-1 text-[9px] font-bold px-1.5 py-0.5 rounded bg-black/75 text-white">
+                                  {allPhotos.length} fotos
+                                </span>
+                              )}
+                            </div>
+                            {allPhotos.length > 1 && (
+                              <div className="flex gap-1 overflow-x-auto">
+                                {allPhotos.slice(1, 5).map((u, idx) => (
+                                  <img
+                                    key={`${req.id}-sol-thumb-${idx}`}
+                                    src={u}
+                                    alt={`Foto ${idx + 2}`}
+                                    className="w-10 h-10 rounded-lg object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                ))}
+                                {allPhotos.length > 5 && (
+                                  <div className="w-10 h-10 rounded-lg bg-slate-800 text-white text-[10px] font-black flex items-center justify-center shrink-0">
+                                    +{allPhotos.length - 5}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+
+                      <div className={`${(req.mediaUrls?.length || req.mediaUrl || (req.extraParts || []).some(e => e.mediaUrls?.length) || photoToShow) ? 'md:col-span-3' : 'md:col-span-4'} space-y-1.5`}>
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
                           <h3 className="text-base font-bold text-slate-900 dark:text-white">
                             {req.partName}
@@ -1295,15 +1376,17 @@ export const ClientApp: React.FC<ClientAppProps> = ({
       {activeChatOrder && (
         (() => {
           const supplier = db.getUserById(activeChatOrder.supplierId);
+          const identityUnlocked = isOrderIdentityUnlocked(activeChatOrder, 'cliente');
+          const maskedName = getMaskedCounterpartyLabel('fornecedor', activeChatOrder.supplierId);
           return (
             <OrderChatModal
               currentUser={currentUser}
               requestId={activeChatOrder.requestId}
               orderId={activeChatOrder.id}
               requestNumber={activeChatOrder.orderNumber}
-              otherPartyName={supplier?.companyName || supplier?.name || 'Fornecedor AUTO SHOP'}
+              otherPartyName={identityUnlocked ? (supplier?.companyName || supplier?.name || maskedName) : maskedName}
               otherPartyRole="fornecedor"
-              otherPartyAvatar={supplier?.avatarUrl}
+              otherPartyAvatar={identityUnlocked ? supplier?.avatarUrl : undefined}
               onClose={() => setActiveChatOrder(null)}
             />
           );
